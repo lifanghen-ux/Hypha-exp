@@ -13,6 +13,8 @@ const plannerOutput = await planWithOpenAICompatible({
   fallbackActions: plannedActions,
   kernelName: "Pi",
   history: input.history ?? [],
+  phaseIndex: input.phase_index ?? 1,
+  verifierFeedback: input.verifier_feedback ?? null,
 });
 
 class MockAssistantStream extends EventStream {

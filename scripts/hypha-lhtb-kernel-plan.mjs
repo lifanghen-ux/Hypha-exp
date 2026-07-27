@@ -12,6 +12,8 @@ const plannerOutput = await planWithOpenAICompatible({
   fallbackActions: plannedActions,
   kernelName: "Hypha",
   history: input.history ?? [],
+  phaseIndex: input.phase_index ?? 1,
+  verifierFeedback: input.verifier_feedback ?? null,
 });
 
 const inference = {

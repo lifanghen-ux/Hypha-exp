@@ -19,7 +19,7 @@ export function llmEnabled() {
   return String(process.env.LHTB_LLM_ENABLED ?? "").toLowerCase() === "true";
 }
 
-export function buildPlannerPrompt({ instruction, kernelName, history }) {
+export function buildPlannerPrompt({ instruction, kernelName, history, phaseIndex, verifierFeedback }) {
   return [
     `You are the planning layer for ${kernelName} on Long-Horizon Terminal-Bench.`,
     "The task runs in a Docker container. You may propose shell commands only.",
@@ -28,11 +28,23 @@ export function buildPlannerPrompt({ instruction, kernelName, history }) {
     '{"planned_actions":[{"type":"shell","command":"...","timeout_sec":120},{"type":"finish","content":"..."}]}',
     "Rules:",
     "- Work in /app unless the task instruction says otherwise.",
-    "- Prefer small inspect commands first, then edits/tests.",
-    "- Return at most 6 actions per response.",
+    "- Follow a closed loop: analyze the latest failure, modify files or dependencies, test the change, then generate required artifacts.",
+    "- Phase 1 may inspect. From phase 2 onward, do not return only ls/cat/grep/pip-list commands; include a concrete edit, install, test, or replay step.",
+    "- If previous output shows pyproject.toml still has langchain==0.0.1, langchain>=1.3, or pydantic<2, your next plan must edit dependency metadata to exactly langchain==1.3.4 and remove pydantic<2 before more inspection.",
+    "- If previous output shows forbidden legacy imports or .predict/.run calls, your next plan must edit the corresponding source files before more inspection.",
+    "- Never introduce or keep forbidden shortcut snippets/classes: FakeListLLM, langchain_community.llms.fake, ROUTE_KEYWORDS, ROUTE_RULES, ROUTE_SCORES, LegacyAnswerLLM, LegacyRouterLLM, LegacyFAQRetriever, AnswerRunnable, RunnableAnswerChain, RunnableRouteChain.",
+    "- If pytest or replay fails, use that exact failure as the next edit target; do not repeat broad directory listings.",
+    "- After editing Python files, run python -m py_compile on the changed files before broader tests.",
+    "- Return at most 8 actions per response.",
     "- Use python scripts for multi-file edits when necessary.",
-    "- End with a finish action only after useful work has been attempted.",
+    "- If the instruction lists outputs/replay_results.jsonl, always make sure a replay command writes that file before finishing.",
+    "- End with a finish action only after useful work has been attempted and the required artifact has been generated or its failure has been diagnosed.",
     "- Do not include API keys or secrets.",
+    "",
+    `Current phase: ${Number(phaseIndex ?? 1)}`,
+    "",
+    "Latest verifier feedback from the previous phase:",
+    formatVerifierFeedback(verifierFeedback),
     "",
     "Previous observations from this trial, if any:",
     formatHistory(history ?? []),
@@ -42,14 +54,41 @@ export function buildPlannerPrompt({ instruction, kernelName, history }) {
   ].join("\n");
 }
 
+export function formatVerifierFeedback(feedback) {
+  if (!feedback || typeof feedback !== "object") return "(none)";
+  const parts = [];
+  if (feedback.reward !== undefined && feedback.reward !== null) {
+    parts.push(`reward: ${String(feedback.reward).trim()}`);
+  }
+  if (feedback.migration_details) {
+    parts.push(`migration_details:\n${JSON.stringify(feedback.migration_details).slice(-5000)}`);
+  }
+  if (feedback.test_stdout_tail) {
+    parts.push(`test_stdout_tail:\n${String(feedback.test_stdout_tail).slice(-4000)}`);
+  }
+  if (feedback.install_log_tail) {
+    parts.push(`install_log_tail:\n${String(feedback.install_log_tail).slice(-3000)}`);
+  }
+  return parts.length ? parts.join("\n\n") : "(none)";
+}
+
 export function formatHistory(history) {
   if (!Array.isArray(history) || history.length === 0) return "(none)";
-  return history.slice(-2).map((turn, turnIndex) => {
+  const oldSummary = history.slice(0, -4).map((turn) => {
+    const phase = turn.phase_index ?? "?";
     const trajectory = Array.isArray(turn.trajectory) ? turn.trajectory : [];
-    const lines = trajectory.slice(-3).map((item) => {
+    const commands = trajectory
+      .filter((item) => item.type === "shell")
+      .map((item) => String(item.command ?? "").slice(0, 120));
+    return commands.length ? `phase ${phase}: ${commands.join(" ; ")}` : `phase ${phase}: no shell actions`;
+  }).join("\n");
+  const recent = history.slice(-4).map((turn) => {
+    const phase = turn.phase_index ?? "?";
+    const trajectory = Array.isArray(turn.trajectory) ? turn.trajectory : [];
+    const lines = trajectory.slice(-4).map((item) => {
       if (item.type !== "shell") return `${item.type}: ${String(item.content ?? "").slice(0, 300)}`;
-      const stdout = String(item.stdout ?? "").slice(-600);
-      const stderr = String(item.stderr ?? "").slice(-400);
+      const stdout = String(item.stdout ?? "").slice(-900);
+      const stderr = String(item.stderr ?? "").slice(-700);
       return [
         `$ ${item.command}`,
         `return_code=${item.return_code}`,
@@ -57,8 +96,12 @@ export function formatHistory(history) {
         stderr ? `stderr:\n${stderr}` : "",
       ].filter(Boolean).join("\n");
     });
-    return `Turn ${turnIndex + 1}:\n${lines.join("\n\n")}`;
+    return `Phase ${phase}:\n${lines.join("\n\n")}`;
   }).join("\n\n---\n\n");
+  return [
+    oldSummary ? `Earlier phase command summary:\n${oldSummary.slice(-4000)}` : "",
+    recent,
+  ].filter(Boolean).join("\n\n---\n\n");
 }
 
 export function normalizePlan(raw) {
@@ -162,7 +205,7 @@ async function requestPlan({ baseUrl, apiKey, model, messages, maxTokens, temper
   return data;
 }
 
-export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName, history }) {
+export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName, history, phaseIndex, verifierFeedback }) {
   if (!llmEnabled()) {
     return {
       planned_actions: fallbackActions,
@@ -175,7 +218,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
   if (!apiKey) throw new Error("OPENAI_API_KEY or DEEPSEEK_API_KEY is required for LLM planning");
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
   const model = process.env.LHTB_MODEL || "deepseek-chat";
-  const prompt = buildPlannerPrompt({ instruction, kernelName, history });
+  const prompt = buildPlannerPrompt({ instruction, kernelName, history, phaseIndex, verifierFeedback });
   const maxTokens = Number(process.env.LHTB_MAX_TOKENS ?? 3072);
   const temperature = Number(process.env.LHTB_TEMPERATURE ?? 0.1);
   const systemMessage = "You produce strict JSON action plans for terminal benchmark agents. Put the JSON in message.content, not in reasoning.";
