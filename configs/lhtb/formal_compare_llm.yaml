@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-llm-compare-v3
+job_name: hypha-exp-lhtb-llm-compare-v4
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1

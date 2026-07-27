@@ -89,6 +89,71 @@ export function extractJsonObject(text) {
   throw new Error(`No JSON object found in planner output: ${trimmed.slice(0, 500)}`);
 }
 
+function fallbackPlan({ fallbackActions, reason, model, usage }) {
+  const actions = Array.isArray(fallbackActions) && fallbackActions.length > 0
+    ? fallbackActions
+    : [
+        { type: "shell", command: "cd /app && pwd && ls -la", timeout_sec: 30, stop_on_error: false },
+        { type: "shell", command: "cd /app && python -m pytest -q 2>&1 | tail -120", timeout_sec: 120, stop_on_error: false },
+      ];
+  return {
+    planned_actions: actions,
+    note: `Planner fallback used: ${reason}`,
+    mode: "fallback_after_llm_error",
+    model,
+    usage: usage ?? null,
+  };
+}
+
+function extractPlannerContent(data) {
+  const message = data.choices?.[0]?.message ?? {};
+  const content = typeof message.content === "string" ? message.content.trim() : "";
+  if (content) return { content, source: "content" };
+
+  const reasoning = typeof message.reasoning_content === "string" ? message.reasoning_content.trim() : "";
+  if (!reasoning) return { content: "", source: "empty" };
+
+  try {
+    return { content: extractJsonObject(reasoning), source: "reasoning_content" };
+  } catch {
+    return { content: "", source: "reasoning_content_without_json", reasoning };
+  }
+}
+
+async function requestPlan({ baseUrl, apiKey, model, messages, maxTokens, temperature }) {
+  const body = {
+    model,
+    messages,
+    response_format: { type: "json_object" },
+    temperature,
+    max_tokens: maxTokens,
+  };
+  if (process.env.LHTB_REASONING_EFFORT) {
+    body.reasoning_effort = process.env.LHTB_REASONING_EFFORT;
+  }
+
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`LLM returned non-JSON HTTP ${response.status}: ${text.slice(0, 500)}`);
+  }
+  if (!response.ok) {
+    throw new Error(`LLM HTTP ${response.status}: ${JSON.stringify(data).slice(0, 1000)}`);
+  }
+  return data;
+}
+
 export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName, history }) {
   if (!llmEnabled()) {
     return {
@@ -103,42 +168,87 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
   const model = process.env.LHTB_MODEL || "deepseek-chat";
   const prompt = buildPlannerPrompt({ instruction, kernelName, history });
+  const maxTokens = Number(process.env.LHTB_MAX_TOKENS ?? 8192);
+  const temperature = Number(process.env.LHTB_TEMPERATURE ?? 0.1);
+  const systemMessage = "You produce strict JSON action plans for terminal benchmark agents. Put the JSON in message.content, not in reasoning.";
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: "You produce strict JSON action plans for terminal benchmark agents." },
-        { role: "user", content: prompt },
-      ],
-      response_format: { type: "json_object" },
-      temperature: Number(process.env.LHTB_TEMPERATURE ?? 0.2),
-      max_tokens: Number(process.env.LHTB_MAX_TOKENS ?? 4096),
-    }),
-  });
-
-  const text = await response.text();
   let data;
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`LLM returned non-JSON HTTP ${response.status}: ${text.slice(0, 500)}`);
+    data = await requestPlan({
+      baseUrl,
+      apiKey,
+      model,
+      messages: [
+        { role: "system", content: systemMessage },
+        { role: "user", content: prompt },
+      ],
+      maxTokens,
+      temperature,
+    });
+  } catch (error) {
+    return fallbackPlan({ fallbackActions, reason: error instanceof Error ? error.message : String(error), model });
   }
-  if (!response.ok) {
-    throw new Error(`LLM HTTP ${response.status}: ${JSON.stringify(data).slice(0, 1000)}`);
+
+  let extracted = extractPlannerContent(data);
+  if (!extracted.content) {
+    try {
+      data = await requestPlan({
+        baseUrl,
+        apiKey,
+        model,
+        messages: [
+          { role: "system", content: "Return only a compact JSON object in message.content. No reasoning text." },
+          {
+            role: "user",
+            content: [
+              "Your previous response did not contain JSON in message.content.",
+              "Now return at most 3 shell actions as strict JSON.",
+              "Schema: {\"planned_actions\":[{\"type\":\"shell\",\"command\":\"...\",\"timeout_sec\":120}]}",
+              "",
+              "Task instruction:",
+              instruction.slice(0, 3000),
+              "",
+              "Previous reasoning excerpt:",
+              String(extracted.reasoning ?? "").slice(0, 1200),
+            ].join("\n"),
+          },
+        ],
+        maxTokens,
+        temperature: 0,
+      });
+      extracted = extractPlannerContent(data);
+    } catch (error) {
+      return fallbackPlan({ fallbackActions, reason: error instanceof Error ? error.message : String(error), model, usage: data?.usage });
+    }
   }
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error(`LLM response missing message content: ${JSON.stringify(data).slice(0, 1000)}`);
+
+  if (!extracted.content) {
+    return fallbackPlan({
+      fallbackActions,
+      reason: `LLM response missing message content (${extracted.source})`,
+      model,
+      usage: data.usage,
+    });
+  }
+
+  let plan;
+  try {
+    plan = normalizePlan(extracted.content);
+  } catch (error) {
+    return fallbackPlan({
+      fallbackActions,
+      reason: `Could not parse planner JSON from ${extracted.source}: ${error instanceof Error ? error.message : String(error)}`,
+      model,
+      usage: data.usage,
+    });
+  }
+
   return {
-    ...normalizePlan(content),
+    ...plan,
     note: `Generated by ${kernelName} through OpenAI-compatible planner.`,
     mode: "llm",
     model,
     usage: data.usage ?? null,
+    content_source: extracted.source,
   };
 }
