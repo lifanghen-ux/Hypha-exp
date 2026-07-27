@@ -30,10 +30,8 @@ export function buildPlannerPrompt({ instruction, kernelName, history, phaseInde
     "- Work in /app unless the task instruction says otherwise.",
     "- Follow a closed loop: analyze the latest failure, modify files or dependencies, test the change, then generate required artifacts.",
     "- Phase 1 may inspect. From phase 2 onward, do not return only ls/cat/grep/pip-list commands; include a concrete edit, install, test, or replay step.",
-    "- If previous output shows pyproject.toml still has langchain==0.0.1, langchain>=1.3, or pydantic<2, your next plan must edit dependency metadata to exactly langchain==1.3.4 and remove pydantic<2 before more inspection.",
-    "- If previous output shows forbidden legacy imports or .predict/.run calls, your next plan must edit the corresponding source files before more inspection.",
-    "- Never introduce or keep forbidden shortcut snippets/classes: FakeListLLM, langchain_community.llms.fake, ROUTE_KEYWORDS, ROUTE_RULES, ROUTE_SCORES, LegacyAnswerLLM, LegacyRouterLLM, LegacyFAQRetriever, AnswerRunnable, RunnableAnswerChain, RunnableRouteChain.",
-    "- If pytest or replay fails, use that exact failure as the next edit target; do not repeat broad directory listings.",
+    "- If verifier feedback names specific files, imports, calls, dependencies, missing outputs, syntax errors, or mismatches, your next plan should modify or test those exact targets before more broad inspection.",
+    "- If a package install, test, or replay command fails, use that exact failure as the next edit target; do not repeat broad directory listings.",
     "- After editing Python files, run python -m py_compile on the changed files before broader tests.",
     "- Return at most 8 actions per response.",
     "- Use python scripts for multi-file edits when necessary.",
@@ -60,8 +58,8 @@ export function formatVerifierFeedback(feedback) {
   if (feedback.reward !== undefined && feedback.reward !== null) {
     parts.push(`reward: ${String(feedback.reward).trim()}`);
   }
-  if (feedback.migration_details) {
-    parts.push(`migration_details:\n${JSON.stringify(feedback.migration_details).slice(-5000)}`);
+  if (feedback.verifier_json) {
+    parts.push(`verifier_json:\n${JSON.stringify(feedback.verifier_json).slice(-5000)}`);
   }
   if (feedback.test_stdout_tail) {
     parts.push(`test_stdout_tail:\n${String(feedback.test_stdout_tail).slice(-4000)}`);

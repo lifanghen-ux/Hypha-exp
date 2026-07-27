@@ -100,14 +100,13 @@ class KernelPlanLHTBAgent(BaseAgent):
             "reward": self._read_tail(verifier_dir / "reward.txt", 200),
             "test_stdout_tail": self._read_tail(verifier_dir / "test-stdout.txt", 5000),
             "install_log_tail": self._read_tail(verifier_dir / "install.log", 5000),
-            "migration_details": None,
+            "verifier_json": {},
         }
-        details_path = verifier_dir / "migration_details.json"
-        if details_path.exists():
+        for details_path in sorted(verifier_dir.glob("*.json")):
             try:
-                feedback["migration_details"] = json.loads(details_path.read_text(encoding="utf-8"))
+                feedback["verifier_json"][details_path.name] = json.loads(details_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
-                feedback["migration_details"] = self._read_tail(details_path, 5000)
+                feedback["verifier_json"][details_path.name] = self._read_tail(details_path, 5000)
         return feedback
 
     @staticmethod
@@ -149,38 +148,13 @@ class KernelPlanLHTBAgent(BaseAgent):
         made_progress = any(self._looks_mutating(command) for command in shell_commands)
 
         if phase_index >= 2 and not made_progress:
-            if phase_index >= 3 and "langchain" in instruction.lower():
-                updated.append(
-                    {
-                        "type": "shell",
-                        "command": (
-                            "cd /app && python - <<'PY'\n"
-                            "from pathlib import Path\n"
-                            "for name in ['pyproject.toml', 'requirements.txt']:\n"
-                            "    p = Path(name)\n"
-                            "    if not p.exists():\n"
-                            "        continue\n"
-                            "    text = p.read_text()\n"
-                            "    text = text.replace('\"pydantic<2\",\\n', '')\n"
-                            "    text = text.replace('pydantic<2\\n', '')\n"
-                            "    text = text.replace('\"langchain==0.0.1\"', '\"langchain==1.3.4\"')\n"
-                            "    text = text.replace('langchain==0.0.1', 'langchain==1.3.4')\n"
-                            "    text = text.replace('langchain>=1.3', 'langchain==1.3.4')\n"
-                            "    p.write_text(text)\n"
-                            "print('updated langchain dependency metadata toward verifier target runtime')\n"
-                            "PY"
-                        ),
-                        "timeout_sec": 60,
-                        "stop_on_error": False,
-                    }
-                )
             updated.append(
                 {
                     "type": "shell",
                     "command": (
                         "cd /app && echo '[agent-guard] phase requires concrete progress; "
-                        "installing editable package and pytest before next diagnostics' && "
-                        "python -m pip install -e . pytest==8.4.1"
+                        "run a focused test or install command, then use verifier feedback for the next edit' && "
+                        "(python -m pip install -e . pytest==8.4.1 || python -m pip install -e . || true)"
                     ),
                     "timeout_sec": 300,
                     "stop_on_error": False,
