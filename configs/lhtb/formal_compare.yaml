@@ -1,0 +1,41 @@
+job_name: hypha-exp-lhtb-formal-compare
+jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
+n_attempts: 1
+n_concurrent_trials: 1
+timeout_multiplier: 1.0
+
+environment:
+  type: docker
+  force_build: false
+  delete: true
+
+agents:
+  - import_path: hypha_exp.benchmarks.lhtb:HyphaLHTBAgent
+    model_name: hypha/kernel-plan
+    override_timeout_sec: 120
+    kwargs:
+      execution_mode: kernel_plan
+      planner_timeout_sec: 60
+      planned_actions:
+        - type: shell
+          command: "pwd && ls -la | head -20"
+          timeout_sec: 30
+        - type: finish
+          content: "Hypha formal compare smoke completed."
+  - import_path: hypha_exp.benchmarks.lhtb:PiLHTBAgent
+    model_name: pi/kernel-plan
+    override_timeout_sec: 120
+    kwargs:
+      execution_mode: kernel_plan
+      planner_timeout_sec: 60
+      planned_actions:
+        - type: shell
+          command: "pwd && ls -la | head -20"
+          timeout_sec: 30
+        - type: finish
+          content: "Pi formal compare smoke completed."
+
+datasets:
+  - path: ./benchmarks/LHTB/tasks
+    task_names:
+      - langchain-version-migration

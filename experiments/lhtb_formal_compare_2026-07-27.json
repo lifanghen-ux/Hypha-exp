@@ -1,0 +1,83 @@
+{
+  "result_path": "outputs/lhtb/hypha-exp-lhtb-formal-compare/result.json",
+  "job_stats": {
+    "n_completed_trials": 2,
+    "n_errored_trials": 0,
+    "n_running_trials": 0,
+    "n_pending_trials": 0,
+    "n_cancelled_trials": 0,
+    "n_retries": 0,
+    "evals": {
+      "hypha-lhtb__kernel-plan__tasks": {
+        "n_trials": 1,
+        "n_errors": 0,
+        "metrics": [
+          {
+            "mean": 0.0
+          }
+        ],
+        "pass_at_k": {},
+        "reward_stats": {
+          "reward": {
+            "0.0": [
+              "langchain-version-migration__kEPL9Pb"
+            ]
+          }
+        },
+        "exception_stats": {}
+      },
+      "pi-lhtb__kernel-plan__tasks": {
+        "n_trials": 1,
+        "n_errors": 0,
+        "metrics": [
+          {
+            "mean": 0.0
+          }
+        ],
+        "pass_at_k": {},
+        "reward_stats": {
+          "reward": {
+            "0.0": [
+              "langchain-version-migration__odgvZYB"
+            ]
+          }
+        },
+        "exception_stats": {}
+      }
+    },
+    "n_input_tokens": null,
+    "n_cache_tokens": null,
+    "n_output_tokens": null,
+    "cost_usd": null
+  },
+  "rows": [
+    {
+      "agent": "hypha-lhtb",
+      "task": "long-horizon-terminal-bench/langchain-version-migration",
+      "reward": 0.0,
+      "success": false,
+      "exception": false
+    },
+    {
+      "agent": "pi-lhtb",
+      "task": "long-horizon-terminal-bench/langchain-version-migration",
+      "reward": 0.0,
+      "success": false,
+      "exception": false
+    }
+  ],
+  "summary": {
+    "hypha-lhtb": {
+      "trials": 1,
+      "mean_reward": 0.0,
+      "success_rate": 0.0,
+      "exceptions": 0
+    },
+    "pi-lhtb": {
+      "trials": 1,
+      "mean_reward": 0.0,
+      "success_rate": 0.0,
+      "exceptions": 0
+    }
+  }
+}

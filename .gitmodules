@@ -1,3 +1,9 @@
 [submodule "benchmarks/LHTB"]
 	path = benchmarks/LHTB
 	url = https://github.com/zli12321/LHTB.git
+[submodule "benchmarks/Hypha"]
+	path = benchmarks/Hypha
+	url = https://github.com/CodeSoul-co/Hypha.git
+[submodule "benchmarks/pi-agent"]
+	path = benchmarks/pi-agent
+	url = https://github.com/earendil-works/pi.git
