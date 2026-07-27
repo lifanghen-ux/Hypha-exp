@@ -1,0 +1,3 @@
+[submodule "benchmarks/LHTB"]
+	path = benchmarks/LHTB
+	url = https://github.com/zli12321/LHTB.git

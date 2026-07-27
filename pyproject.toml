@@ -1,0 +1,14 @@
+[project]
+name = "hypha-exp"
+version = "0.1.0"
+description = "Hypha benchmark experiments and adapters."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

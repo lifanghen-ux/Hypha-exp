@@ -1,0 +1,20 @@
+job_name: hypha-exp-lhtb-oracle-smoke
+jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
+n_attempts: 1
+n_concurrent_trials: 1
+timeout_multiplier: 1.0
+
+environment:
+  type: docker
+  force_build: false
+  delete: true
+
+agents:
+  - name: oracle
+
+datasets:
+  - path: ./benchmarks/LHTB/tasks
+    task_names:
+      - langchain-version-migration
+      - document-table-layout-reconstruction
+      - great-expectations-audit

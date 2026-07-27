@@ -1,0 +1,20 @@
+{
+  "benchmark": "LHTB/Harbor",
+  "run_type": "oracle_smoke",
+  "date": "2026-07-27",
+  "job_name": "hypha-exp-lhtb-oracle-smoke",
+  "result_path": "/root/projects/Hypha-exp/outputs/lhtb/hypha-exp-lhtb-oracle-smoke/result.json",
+  "tasks": [
+    "langchain-version-migration",
+    "document-table-layout-reconstruction",
+    "great-expectations-audit"
+  ],
+  "metrics": {
+    "n_total_trials": 3,
+    "n_completed_trials": 3,
+    "n_errored_trials": 0,
+    "mean_reward": 1.0,
+    "reward_1_count": 3
+  },
+  "note": "Oracle smoke validates LHTB/Harbor/Docker/verifier infrastructure; it is not a Hypha agent score."
+}
