@@ -29,6 +29,7 @@ export function buildPlannerPrompt({ instruction, kernelName }) {
     "Rules:",
     "- Work in /app unless the task instruction says otherwise.",
     "- Prefer small inspect commands first, then edits/tests.",
+    "- Return at most 6 actions per response.",
     "- Use python scripts for multi-file edits when necessary.",
     "- End with a finish action only after useful work has been attempted.",
     "- Do not include API keys or secrets.",
@@ -39,7 +40,7 @@ export function buildPlannerPrompt({ instruction, kernelName }) {
 }
 
 export function normalizePlan(raw) {
-  const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+  const parsed = typeof raw === "string" ? JSON.parse(extractJsonObject(raw)) : raw;
   const actions = parsed.planned_actions ?? parsed.plannedActions ?? [];
   if (!Array.isArray(actions)) throw new Error("planned_actions must be an array");
   return {
@@ -55,6 +56,15 @@ export function normalizePlan(raw) {
       };
     }).filter((action) => action.type === "finish" || action.command.trim()),
   };
+}
+
+export function extractJsonObject(text) {
+  const trimmed = String(text ?? "").trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) return trimmed.slice(start, end + 1);
+  throw new Error(`No JSON object found in planner output: ${trimmed.slice(0, 500)}`);
 }
 
 export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName }) {
@@ -86,7 +96,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
       ],
       response_format: { type: "json_object" },
       temperature: Number(process.env.LHTB_TEMPERATURE ?? 0.2),
-      max_tokens: Number(process.env.LHTB_MAX_TOKENS ?? 1200),
+      max_tokens: Number(process.env.LHTB_MAX_TOKENS ?? 4096),
     }),
   });
 
