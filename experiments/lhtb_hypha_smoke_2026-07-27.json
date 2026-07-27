@@ -1,0 +1,16 @@
+{
+  "benchmark": "LHTB/Harbor",
+  "run_type": "hypha_adapter_smoke",
+  "date": "2026-07-27",
+  "job_name": "hypha-exp-lhtb-hypha-smoke",
+  "result_path": "/root/projects/Hypha-exp/outputs/lhtb/hypha-exp-lhtb-hypha-smoke/result.json",
+  "tasks": ["langchain-version-migration"],
+  "metrics": {
+    "n_total_trials": 1,
+    "n_completed_trials": 1,
+    "n_errored_trials": 0,
+    "mean_reward": 0.0,
+    "reward_0_count": 1
+  },
+  "note": "Custom Hypha adapter load/execution smoke; deterministic shell plan does not solve the task."
+}

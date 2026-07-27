@@ -1,0 +1,27 @@
+job_name: hypha-exp-lhtb-hypha-smoke
+jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
+n_attempts: 1
+n_concurrent_trials: 1
+timeout_multiplier: 1.0
+
+environment:
+  type: docker
+  force_build: false
+  delete: true
+
+agents:
+  - import_path: hypha_exp.benchmarks.lhtb:HyphaLHTBAgent
+    model_name: hypha/planned-shell-smoke
+    override_timeout_sec: 300
+    kwargs:
+      planned_actions:
+        - type: shell
+          command: "pwd && ls -la | head -20"
+          timeout_sec: 30
+        - type: finish
+          content: "Hypha LHTB adapter smoke completed."
+
+datasets:
+  - path: ./benchmarks/LHTB/tasks
+    task_names:
+      - langchain-version-migration
