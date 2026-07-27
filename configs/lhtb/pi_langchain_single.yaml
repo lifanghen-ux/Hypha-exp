@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-langchain-pi-single-v2
+job_name: hypha-exp-lhtb-langchain-pi-single-v3-generic
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1
