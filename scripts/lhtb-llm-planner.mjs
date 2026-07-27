@@ -44,12 +44,12 @@ export function buildPlannerPrompt({ instruction, kernelName, history }) {
 
 export function formatHistory(history) {
   if (!Array.isArray(history) || history.length === 0) return "(none)";
-  return history.slice(-4).map((turn, turnIndex) => {
+  return history.slice(-2).map((turn, turnIndex) => {
     const trajectory = Array.isArray(turn.trajectory) ? turn.trajectory : [];
-    const lines = trajectory.slice(-6).map((item) => {
+    const lines = trajectory.slice(-3).map((item) => {
       if (item.type !== "shell") return `${item.type}: ${String(item.content ?? "").slice(0, 300)}`;
-      const stdout = String(item.stdout ?? "").slice(-1200);
-      const stderr = String(item.stderr ?? "").slice(-800);
+      const stdout = String(item.stdout ?? "").slice(-600);
+      const stderr = String(item.stderr ?? "").slice(-400);
       return [
         `$ ${item.command}`,
         `return_code=${item.return_code}`,
@@ -120,7 +120,7 @@ function extractPlannerContent(data) {
   }
 }
 
-async function requestPlan({ baseUrl, apiKey, model, messages, maxTokens, temperature }) {
+async function requestPlan({ baseUrl, apiKey, model, messages, maxTokens, temperature, timeoutMs }) {
   const body = {
     model,
     messages,
@@ -132,14 +132,22 @@ async function requestPlan({ baseUrl, apiKey, model, messages, maxTokens, temper
     body.reasoning_effort = process.env.LHTB_REASONING_EFFORT;
   }
 
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   const text = await response.text();
   let data;
@@ -168,7 +176,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
   const model = process.env.LHTB_MODEL || "deepseek-chat";
   const prompt = buildPlannerPrompt({ instruction, kernelName, history });
-  const maxTokens = Number(process.env.LHTB_MAX_TOKENS ?? 8192);
+  const maxTokens = Number(process.env.LHTB_MAX_TOKENS ?? 3072);
   const temperature = Number(process.env.LHTB_TEMPERATURE ?? 0.1);
   const systemMessage = "You produce strict JSON action plans for terminal benchmark agents. Put the JSON in message.content, not in reasoning.";
 
@@ -184,6 +192,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
       ],
       maxTokens,
       temperature,
+      timeoutMs: Number(process.env.LHTB_REQUEST_TIMEOUT_MS ?? 90000),
     });
   } catch (error) {
     return fallbackPlan({ fallbackActions, reason: error instanceof Error ? error.message : String(error), model });
@@ -215,6 +224,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
         ],
         maxTokens,
         temperature: 0,
+        timeoutMs: Number(process.env.LHTB_RETRY_TIMEOUT_MS ?? 60000),
       });
       extracted = extractPlannerContent(data);
     } catch (error) {
