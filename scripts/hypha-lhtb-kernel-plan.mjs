@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import { ReActAgentRunner } from "../benchmarks/Hypha/packages/kernel/dist/index.js";
+import { loadDotEnv, planWithOpenAICompatible } from "./lhtb-llm-planner.mjs";
 
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const plannedActions = input.planned_actions ?? input.plannedActions ?? [];
 const steps = [];
+loadDotEnv(new URL("..", import.meta.url).pathname);
+const plannerOutput = await planWithOpenAICompatible({
+  instruction: input.instruction ?? "",
+  fallbackActions: plannedActions,
+  kernelName: "Hypha",
+});
 
 const inference = {
   async infer(request) {
@@ -13,10 +20,7 @@ const inference = {
       modelAlias: request.modelAlias,
       output: {
         action: "finish",
-        output: {
-          planned_actions: plannedActions,
-          note: "Generated through Hypha ReActAgentRunner for LHTB integration.",
-        },
+        output: plannerOutput,
       },
       usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
       metadata: { source: "hypha-exp-lhtb-kernel-plan" },

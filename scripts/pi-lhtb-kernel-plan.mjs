@@ -2,10 +2,17 @@
 import fs from "node:fs";
 import { Agent } from "../benchmarks/pi-agent/packages/agent/dist/index.js";
 import { EventStream } from "../benchmarks/pi-agent/packages/ai/dist/index.js";
+import { loadDotEnv, planWithOpenAICompatible } from "./lhtb-llm-planner.mjs";
 
 const input = JSON.parse(fs.readFileSync(0, "utf8"));
 const plannedActions = input.planned_actions ?? input.plannedActions ?? [];
 const events = [];
+loadDotEnv(new URL("..", import.meta.url).pathname);
+const plannerOutput = await planWithOpenAICompatible({
+  instruction: input.instruction ?? "",
+  fallbackActions: plannedActions,
+  kernelName: "Pi",
+});
 
 class MockAssistantStream extends EventStream {
   constructor() {
@@ -51,10 +58,7 @@ const streamFn = () => {
       type: "done",
       reason: "stop",
       message: createAssistantMessage(
-        JSON.stringify({
-          planned_actions: plannedActions,
-          note: "Generated through Pi Agent stream loop for LHTB integration.",
-        }),
+        JSON.stringify(plannerOutput),
       ),
     });
   });

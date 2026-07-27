@@ -1,0 +1,39 @@
+job_name: hypha-exp-lhtb-llm-compare
+jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
+n_attempts: 1
+n_concurrent_trials: 1
+timeout_multiplier: 1.0
+
+environment:
+  type: docker
+  force_build: false
+  delete: true
+
+agents:
+  - import_path: hypha_exp.benchmarks.lhtb:HyphaLHTBAgent
+    model_name: hypha/deepseek
+    override_timeout_sec: 900
+    kwargs:
+      execution_mode: kernel_plan
+      planner_timeout_sec: 120
+      planned_actions:
+        - type: shell
+          command: "cd /app && pwd && ls -la"
+          timeout_sec: 30
+  - import_path: hypha_exp.benchmarks.lhtb:PiLHTBAgent
+    model_name: pi/deepseek
+    override_timeout_sec: 900
+    kwargs:
+      execution_mode: kernel_plan
+      planner_timeout_sec: 120
+      planned_actions:
+        - type: shell
+          command: "cd /app && pwd && ls -la"
+          timeout_sec: 30
+
+datasets:
+  - path: ./benchmarks/LHTB/tasks
+    task_names:
+      - langchain-version-migration
+      - great-expectations-audit
+      - document-table-layout-reconstruction
