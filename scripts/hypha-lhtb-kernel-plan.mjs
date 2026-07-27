@@ -11,6 +11,7 @@ const plannerOutput = await planWithOpenAICompatible({
   instruction: input.instruction ?? "",
   fallbackActions: plannedActions,
   kernelName: "Hypha",
+  history: input.history ?? [],
 });
 
 const inference = {

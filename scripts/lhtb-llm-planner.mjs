@@ -19,7 +19,7 @@ export function llmEnabled() {
   return String(process.env.LHTB_LLM_ENABLED ?? "").toLowerCase() === "true";
 }
 
-export function buildPlannerPrompt({ instruction, kernelName }) {
+export function buildPlannerPrompt({ instruction, kernelName, history }) {
   return [
     `You are the planning layer for ${kernelName} on Long-Horizon Terminal-Bench.`,
     "The task runs in a Docker container. You may propose shell commands only.",
@@ -34,9 +34,31 @@ export function buildPlannerPrompt({ instruction, kernelName }) {
     "- End with a finish action only after useful work has been attempted.",
     "- Do not include API keys or secrets.",
     "",
+    "Previous observations from this trial, if any:",
+    formatHistory(history ?? []),
+    "",
     "Benchmark instruction:",
     instruction,
   ].join("\n");
+}
+
+export function formatHistory(history) {
+  if (!Array.isArray(history) || history.length === 0) return "(none)";
+  return history.slice(-4).map((turn, turnIndex) => {
+    const trajectory = Array.isArray(turn.trajectory) ? turn.trajectory : [];
+    const lines = trajectory.slice(-6).map((item) => {
+      if (item.type !== "shell") return `${item.type}: ${String(item.content ?? "").slice(0, 300)}`;
+      const stdout = String(item.stdout ?? "").slice(-1200);
+      const stderr = String(item.stderr ?? "").slice(-800);
+      return [
+        `$ ${item.command}`,
+        `return_code=${item.return_code}`,
+        stdout ? `stdout:\n${stdout}` : "",
+        stderr ? `stderr:\n${stderr}` : "",
+      ].filter(Boolean).join("\n");
+    });
+    return `Turn ${turnIndex + 1}:\n${lines.join("\n\n")}`;
+  }).join("\n\n---\n\n");
 }
 
 export function normalizePlan(raw) {
@@ -67,7 +89,7 @@ export function extractJsonObject(text) {
   throw new Error(`No JSON object found in planner output: ${trimmed.slice(0, 500)}`);
 }
 
-export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName }) {
+export async function planWithOpenAICompatible({ instruction, fallbackActions, kernelName, history }) {
   if (!llmEnabled()) {
     return {
       planned_actions: fallbackActions,
@@ -80,7 +102,7 @@ export async function planWithOpenAICompatible({ instruction, fallbackActions, k
   if (!apiKey) throw new Error("OPENAI_API_KEY or DEEPSEEK_API_KEY is required for LLM planning");
   const baseUrl = (process.env.OPENAI_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
   const model = process.env.LHTB_MODEL || "deepseek-chat";
-  const prompt = buildPlannerPrompt({ instruction, kernelName });
+  const prompt = buildPlannerPrompt({ instruction, kernelName, history });
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",

@@ -64,12 +64,32 @@ class KernelPlanLHTBAgent(BaseAgent):
             encoding="utf-8",
         )
 
-    def _plan_with_kernel(self, instruction: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def _history_path(self) -> Path:
+        return self.logs_dir / "history.json"
+
+    def _load_history(self) -> list[dict[str, Any]]:
+        path = self._history_path()
+        if not path.exists():
+            return []
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def _save_history(self, history: list[dict[str, Any]]) -> None:
+        self._history_path().write_text(
+            json.dumps(history, indent=2),
+            encoding="utf-8",
+        )
+
+    def _plan_with_kernel(
+        self,
+        instruction: str,
+        history: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         payload = {
             "instruction": instruction,
             "planned_actions": self.planned_actions,
             "model_alias": self.model_name or self.name(),
             "run_id": self.logs_dir.name,
+            "history": history,
         }
         completed = subprocess.run(
             [self.node_path, str(self.helper_path)],
@@ -96,11 +116,15 @@ class KernelPlanLHTBAgent(BaseAgent):
             raise TypeError(f"{self.name()} planner output.planned_actions must be a list")
         return actions, record
 
-    def _resolve_actions(self, instruction: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    def _resolve_actions(
+        self,
+        instruction: str,
+        history: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
         if self.execution_mode == "planned_actions":
             return self.planned_actions, None
         if self.execution_mode == "kernel_plan":
-            return self._plan_with_kernel(instruction)
+            return self._plan_with_kernel(instruction, history)
         raise ValueError(f"Unsupported execution_mode: {self.execution_mode}")
 
     async def run(
@@ -112,7 +136,8 @@ class KernelPlanLHTBAgent(BaseAgent):
         trajectory: list[dict[str, Any]] = []
         final_output = ""
 
-        actions, planner_record = self._resolve_actions(instruction)
+        history = self._load_history()
+        actions, planner_record = self._resolve_actions(instruction, history)
         if planner_record is not None:
             (self.logs_dir / "kernel_plan.json").write_text(
                 json.dumps(planner_record, indent=2),
@@ -161,6 +186,8 @@ class KernelPlanLHTBAgent(BaseAgent):
             "trajectory": trajectory,
             "final_output": final_output,
         }
+        history.append(payload)
+        self._save_history(history[-12:])
         (self.logs_dir / "trajectory.json").write_text(
             json.dumps(payload, indent=2),
             encoding="utf-8",
