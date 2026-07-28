@@ -21,4 +21,4 @@ agents:
 datasets:
   - path: ./benchmarks/LHTB/tasks
     task_names:
-      - 2048
+      - "2048"
