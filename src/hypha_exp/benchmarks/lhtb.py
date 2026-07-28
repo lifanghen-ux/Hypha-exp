@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import asyncio
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -321,6 +322,7 @@ class PiRealLHTBAgent(BaseAgent):
         helper_path: str | None = None,
         node_path: str | None = None,
         max_tool_calls_per_phase: int = 6,
+        max_context_messages: int = 24,
         helper_timeout_sec: int = 600,
         **kwargs: Any,
     ):
@@ -330,6 +332,7 @@ class PiRealLHTBAgent(BaseAgent):
             self._repo_root() / "benchmarks" / "pi-agent" / "node_modules" / "node" / "bin" / "node"
         )
         self.max_tool_calls_per_phase = max_tool_calls_per_phase
+        self.max_context_messages = max_context_messages
         self.helper_timeout_sec = helper_timeout_sec
 
     @staticmethod
@@ -395,6 +398,7 @@ class PiRealLHTBAgent(BaseAgent):
                 "helper_path": str(self.helper_path),
                 "node_path": self.node_path,
                 "max_tool_calls_per_phase": self.max_tool_calls_per_phase,
+                "max_context_messages": self.max_context_messages,
             },
         )
 
@@ -425,6 +429,7 @@ class PiRealLHTBAgent(BaseAgent):
             "phase_index": phase_index,
             "verifier_feedback": verifier_feedback,
             "max_tool_calls": self.max_tool_calls_per_phase,
+            "max_context_messages": self.max_context_messages,
             "result_path": str(self.logs_dir / "pi_helper_result.json"),
         }
         process.stdin.write((json.dumps(init_payload) + "\n").encode("utf-8"))
@@ -444,7 +449,11 @@ class PiRealLHTBAgent(BaseAgent):
                     stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
                 return_code = await process.wait()
                 raise RuntimeError(f"{self.name()} helper exited early ({return_code}): {stderr}")
-            event = json.loads(line.decode("utf-8"))
+            decoded_line = line.decode("utf-8", errors="replace")
+            try:
+                event = json.loads(decoded_line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(f"{self.name()} emitted invalid protocol JSON: {decoded_line[:1000]}") from error
             if event.get("type") == "tool_request":
                 args = event.get("args") or {}
                 command = str(args.get("command") or "")
@@ -476,7 +485,10 @@ class PiRealLHTBAgent(BaseAgent):
                 if process.stderr is not None:
                     stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
                 result_path = Path(event["result_path"])
-                result = json.loads(result_path.read_text(encoding="utf-8"))
+                try:
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as error:
+                    raise RuntimeError(f"{self.name()} wrote invalid result JSON at {result_path}") from error
                 result["return_code"] = return_code
                 result["stderr"] = stderr
                 result["tool_requests"] = tool_requests
@@ -504,21 +516,38 @@ class PiRealLHTBAgent(BaseAgent):
         messages: list[dict[str, Any]] = self._load_json(self._messages_path(), [])
         phase_index = len(history) + 1
         verifier_feedback = self._verifier_feedback()
+        started = time.monotonic()
 
-        result = await self._run_pi_helper(
-            instruction=instruction,
-            messages=messages,
-            verifier_feedback=verifier_feedback,
-            phase_index=phase_index,
-            environment=environment,
-        )
+        adapter_error = None
+        try:
+            result = await self._run_pi_helper(
+                instruction=instruction,
+                messages=messages,
+                verifier_feedback=verifier_feedback,
+                phase_index=phase_index,
+                environment=environment,
+            )
+        except Exception as error:
+            adapter_error = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+            result = {
+                "status": "adapter_error",
+                "errorMessage": str(error),
+                "messages": messages,
+                "tool_requests": [],
+            }
+        elapsed_sec = round(time.monotonic() - started, 3)
 
         payload = {
             "agent": self.name(),
             "version": self.version(),
             "model_name": self.model_name,
             "phase_index": phase_index,
+            "elapsed_sec": elapsed_sec,
             "verifier_feedback": verifier_feedback,
+            "adapter_error": adapter_error,
             "pi_result": result,
             "tool_requests": result.get("tool_requests", []),
         }
@@ -528,3 +557,5 @@ class PiRealLHTBAgent(BaseAgent):
         self._append_history_full(payload)
         self._save_json(self.logs_dir / "trajectory.json", payload)
         context.metadata = payload
+        if adapter_error is not None:
+            raise RuntimeError(f"{self.name()} adapter error: {adapter_error['message']}")

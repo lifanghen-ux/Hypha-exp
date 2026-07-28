@@ -29,6 +29,32 @@ function compact(value, limit = 4000) {
   return String(value ?? "").slice(-limit);
 }
 
+function compactTextBlock(block, limit) {
+  if (block?.type !== "text") return block;
+  const text = String(block.text ?? "");
+  if (text.length <= limit) return block;
+  return { ...block, text: `${text.slice(0, Math.floor(limit / 2))}\n...[truncated]...\n${text.slice(-Math.floor(limit / 2))}` };
+}
+
+function compactMessage(message) {
+  if (!message || typeof message !== "object") return message;
+  if (!Array.isArray(message.content)) return message;
+  const limit = message.role === "toolResult" ? 2500 : 5000;
+  return {
+    ...message,
+    content: message.content.map((block) => compactTextBlock(block, limit)),
+  };
+}
+
+function selectContextMessages(messages, maxMessages) {
+  if (!Array.isArray(messages) || messages.length <= maxMessages) {
+    return messages.map(compactMessage);
+  }
+  const first = messages[0]?.role === "user" ? [compactMessage(messages[0])] : [];
+  const recent = messages.slice(-maxMessages).map(compactMessage);
+  return [...first, ...recent];
+}
+
 async function readInit() {
   return new Promise((resolve, reject) => {
     const onLine = (line) => {
@@ -158,7 +184,8 @@ try {
   const input = await readInit();
   rl.on("line", handleToolResultLine);
   const maxToolCalls = Number(input.max_tool_calls ?? 6);
-  let lastToolResultCount = countToolResults(input.messages ?? []);
+  const maxContextMessages = Number(input.max_context_messages ?? process.env.LHTB_PI_MAX_CONTEXT_MESSAGES ?? 24);
+  let executedToolCalls = 0;
   let forceStop = false;
   const events = [];
 
@@ -185,9 +212,23 @@ try {
     sessionId: input.run_id,
     toolExecution: "sequential",
     getApiKey: () => process.env.OPENAI_API_KEY || process.env.DEEPSEEK_API_KEY,
+    transformContext: async (messages) => selectContextMessages(messages, maxContextMessages),
+    beforeToolCall: ({ toolCall }) => {
+      if (executedToolCalls >= maxToolCalls) {
+        forceStop = true;
+        return {
+          block: true,
+          reason: `Tool budget for this phase is exhausted (${maxToolCalls}). Stop this phase and wait for verifier feedback.`,
+        };
+      }
+      if (toolCall.name !== "shell") {
+        return { block: true, reason: `Only the shell tool is available, got ${toolCall.name}.` };
+      }
+      executedToolCalls += 1;
+      return undefined;
+    },
     afterToolCall: ({ result }) => {
-      const currentCount = countToolResults(agent.state.messages) + 1;
-      forceStop = currentCount - lastToolResultCount >= maxToolCalls;
+      forceStop = executedToolCalls >= maxToolCalls;
       return forceStop ? { ...result, terminate: true } : undefined;
     },
     initialState: {
@@ -195,7 +236,7 @@ try {
       model: createModel(input),
       thinkingLevel: process.env.LHTB_REASONING_EFFORT === "off" ? "off" : "off",
       tools: [shellTool],
-      messages: Array.isArray(input.messages) ? input.messages : [],
+      messages: selectContextMessages(Array.isArray(input.messages) ? input.messages : [], maxContextMessages),
     },
   });
 
@@ -212,6 +253,9 @@ try {
     messages: agent.state.messages,
     events,
     forceStop,
+    executedToolCalls,
+    maxToolCalls,
+    maxContextMessages,
   };
   const resultPath = input.result_path || `/tmp/pi-lhtb-result-${Date.now()}.json`;
   fs.writeFileSync(resultPath, JSON.stringify(resultPayload, null, 2));
