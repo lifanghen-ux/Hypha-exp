@@ -119,3 +119,67 @@ The stopped v2 output remains available and was not modified:
 ```text
 outputs/lhtb/hypha-exp-lhtb-pi-real-five-task-protocol-v2
 ```
+
+## Trial-budget exit smoke
+
+The experiment-owned `BudgetAwareTrial` extends the pinned Harbor trial with
+one generic behavior: after an adapter returns
+`metadata.stop_requested=true`, Harbor leaves `continue_until_timeout` and runs
+the official final verifier. It does not alter tasks, environments, verifier
+inputs, verifier rewards, or artifacts. Pi and Hypha must use the same launcher
+for comparison runs.
+
+The exit path was tested on `langchain-version-migration`, whose official task
+sets `continue_until_timeout=true`. The total tool budget was deliberately set
+to one.
+
+```text
+Output:
+outputs/lhtb/hypha-exp-lhtb-pi-real-budget-exit-smoke-v1/
+  langchain-version-migration__8YBVu64
+
+Service wall time:          22 seconds
+Harbor reported runtime:    18 seconds
+Phases:                     1
+Model calls:                1
+Tool calls:                 1
+Total tokens:               1801
+Reward:                     0.0
+stop_requested:             true
+stop_reason:                max_tool_calls
+protocol_stop_requested:    true
+adapter_error:              null
+Harbor exception:           null
+Residual Node processes:    0
+Official LHTB dirty files:  0
+```
+
+The zero reward is expected because this smoke intentionally allows only one
+tool call. Its purpose is to validate clean protocol termination, not task
+performance.
+
+## Three-task protocol validation
+
+The post-smoke validation uses:
+
+```text
+Config: configs/lhtb/pi_real_three_task_budget.yaml
+Attempts per task: 1
+Concurrency: 1
+Agent timeout: 1200 seconds
+Maximum phases: 12
+Maximum model calls: 48
+Maximum tool calls: 48
+Maximum total tokens: 400000
+Maximum tool calls per phase: 4
+Maximum context messages: 20
+Maximum shell timeout: 120 seconds
+```
+
+Tasks:
+
+```text
+langchain-version-migration
+great-expectations-audit
+document-table-layout-reconstruction
+```
