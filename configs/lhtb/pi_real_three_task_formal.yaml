@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-pi-real-three-task-formal-v1
+job_name: hypha-exp-lhtb-pi-real-three-task-formal-v2
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1
@@ -15,12 +15,13 @@ agents:
     kwargs:
       max_tool_calls_per_phase: 4
       max_context_messages: 20
+      max_saved_history_records: 30
       helper_timeout_sec: 180
       max_shell_timeout_sec: 120
-      max_phases: 600
-      max_model_calls: 1200
-      max_tool_calls: 2400
-      max_total_tokens: 10000000
+      max_phases: 180
+      max_model_calls: 360
+      max_tool_calls: 720
+      max_total_tokens: 3000000
 
 datasets:
   - path: ./benchmarks/LHTB/tasks

@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-pi-real-tool-loop-smoke-v6
+job_name: hypha-exp-lhtb-pi-real-tool-loop-smoke-v7
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1
@@ -16,6 +16,7 @@ agents:
     kwargs:
       max_tool_calls_per_phase: 4
       max_context_messages: 20
+      max_saved_history_records: 3
       helper_timeout_sec: 180
       max_shell_timeout_sec: 120
       max_phases: 4

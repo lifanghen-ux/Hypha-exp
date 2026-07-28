@@ -18,46 +18,51 @@ def read_text(path: Path) -> str | None:
     return path.read_text(encoding="utf-8", errors="replace").strip()
 
 
+def iter_history_records(agent_dir: Path):
+    jsonl_path = agent_dir / "history_full.jsonl"
+    if jsonl_path.exists():
+        with jsonl_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                yield json.loads(line)
+        return
+    for item in read_json(agent_dir / "history.json", []):
+        yield item
+
+
 def summarize_trial(trial_dir: Path) -> dict[str, Any]:
-    trajectory = read_json(trial_dir / "agent" / "trajectory.json", {})
-    history = read_json(trial_dir / "agent" / "history.json", [])
-    config = read_json(trial_dir / "config.json", {})
-    exceptions = [
-        item.get("adapter_error")
-        for item in history
-        if item.get("adapter_error") is not None
-    ]
-    tool_requests = [
-        request
-        for item in history
-        for request in item.get("tool_requests", [])
-    ]
-    dropped_tool_calls = sum(
-        int(item.get("pi_result", {}).get("droppedToolCalls", 0))
-        for item in history
-    )
-    budget_error_messages = sum(
-        json.dumps(item.get("pi_result", {}).get("messages", [])).count(
+    agent_dir = trial_dir / "agent"
+    trajectory = read_json(agent_dir / "trajectory.json", {})
+    history_count = 0
+    exceptions = []
+    tool_requests = []
+    dropped_tool_calls = 0
+    budget_error_messages = 0
+    orphan_calls = []
+    orphan_results = []
+    max_tool_calls_in_phase = 0
+    for item in iter_history_records(agent_dir):
+        history_count += 1
+        if item.get("adapter_error") is not None:
+            exceptions.append(item.get("adapter_error"))
+        phase_requests = item.get("tool_requests", [])
+        tool_requests.extend(phase_requests)
+        max_tool_calls_in_phase = max(max_tool_calls_in_phase, len(phase_requests))
+        pi_result = item.get("pi_result", {})
+        dropped_tool_calls += int(pi_result.get("droppedToolCalls", 0) or 0)
+        budget_error_messages += json.dumps(pi_result.get("messages", [])).count(
             "Tool budget for this phase is exhausted"
         )
-        for item in history
-    )
-    orphan_calls = [
-        call_id
-        for item in history
-        for call_id in item.get("pi_result", {})
-        .get("context", {})
-        .get("selected_integrity", {})
-        .get("orphanToolCallIds", [])
-    ]
-    orphan_results = [
-        call_id
-        for item in history
-        for call_id in item.get("pi_result", {})
-        .get("context", {})
-        .get("selected_integrity", {})
-        .get("orphanToolResultIds", [])
-    ]
+        selected_integrity = (
+            pi_result.get("context", {}).get("selected_integrity", {})
+            if isinstance(pi_result, dict)
+            else {}
+        )
+        orphan_calls.extend(selected_integrity.get("orphanToolCallIds", []) or [])
+        orphan_results.extend(selected_integrity.get("orphanToolResultIds", []) or [])
+    config = read_json(trial_dir / "config.json", {})
     metrics = trajectory.get("metrics", {})
     task_path = config.get("task", {}).get("path")
     exception_text = read_text(trial_dir / "exception.txt")
@@ -67,16 +72,13 @@ def summarize_trial(trial_dir: Path) -> dict[str, Any]:
         "reward": read_text(trial_dir / "verifier" / "reward.txt"),
         "harbor_exception": exception_text.splitlines()[-1] if exception_text else None,
         "adapter_errors": exceptions,
-        "phases": len(history),
+        "phases": history_count,
         "elapsed_sec": metrics.get("cumulative_elapsed_sec"),
         "usage": metrics.get("cumulative_usage", {}),
         "tool_calls": metrics.get("cumulative_tool_calls", len(tool_requests)),
         "dropped_tool_calls": dropped_tool_calls,
         "budget_error_messages": budget_error_messages,
-        "max_tool_calls_in_phase": max(
-            (len(item.get("tool_requests", [])) for item in history),
-            default=0,
-        ),
+        "max_tool_calls_in_phase": max_tool_calls_in_phase,
         "orphan_tool_call_ids": orphan_calls,
         "orphan_tool_result_ids": orphan_results,
         "effective_shell_timeouts_sec": sorted(

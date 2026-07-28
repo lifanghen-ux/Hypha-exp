@@ -9,7 +9,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-job_dir="outputs/lhtb/hypha-exp-lhtb-pi-real-three-task-formal-v1"
+job_dir="outputs/lhtb/hypha-exp-lhtb-pi-real-three-task-formal-v2"
 uv run python -m hypha_exp.benchmarks.harbor_budget_cli \
   run -c configs/lhtb/pi_real_three_task_formal.yaml --yes
 uv run python scripts/summarize_pi_real_protocol.py "$job_dir"

@@ -13,6 +13,7 @@ from harbor.models.agent.context import AgentContext
 
 from hypha_exp.benchmarks.trial_budget import (
     TrialBudgetLimits,
+    TrialBudgetSnapshot,
     summarize_trial_budget,
 )
 
@@ -330,6 +331,7 @@ class PiRealLHTBAgent(BaseAgent):
         max_context_messages: int = 24,
         helper_timeout_sec: int = 600,
         max_shell_timeout_sec: int = 120,
+        max_saved_history_records: int = 50,
         max_phases: int | None = None,
         max_model_calls: int | None = None,
         max_tool_calls: int | None = None,
@@ -345,6 +347,7 @@ class PiRealLHTBAgent(BaseAgent):
         self.max_context_messages = max_context_messages
         self.helper_timeout_sec = helper_timeout_sec
         self.max_shell_timeout_sec = max_shell_timeout_sec
+        self.max_saved_history_records = max(1, int(max_saved_history_records))
         self.trial_budget_limits = TrialBudgetLimits(
             max_phases=max_phases,
             max_model_calls=max_model_calls,
@@ -369,6 +372,9 @@ class PiRealLHTBAgent(BaseAgent):
     def _messages_path(self) -> Path:
         return self.logs_dir / "pi_messages.json"
 
+    def _trial_state_path(self) -> Path:
+        return self.logs_dir / "trial_state.json"
+
     def _history_full_path(self) -> Path:
         return self.logs_dir / "history_full.jsonl"
 
@@ -383,6 +389,111 @@ class PiRealLHTBAgent(BaseAgent):
     def _append_history_full(self, payload: dict[str, Any]) -> None:
         with self._history_full_path().open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    def _compact_text(self, value: Any, limit: int = 8000) -> str:
+        text = str(value or "")
+        if len(text) <= limit:
+            return text
+        half = max(1, limit // 2)
+        return f"{text[:half]}\n...[truncated {len(text) - limit} chars]...\n{text[-half:]}"
+
+    def _compact_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        compacted = dict(result)
+        if "stdout" in compacted:
+            compacted["stdout"] = self._compact_text(compacted.get("stdout"), 8000)
+        if "stderr" in compacted:
+            compacted["stderr"] = self._compact_text(compacted.get("stderr"), 4000)
+        return compacted
+
+    def _compact_tool_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        compacted = dict(request)
+        if isinstance(compacted.get("result"), dict):
+            compacted["result"] = self._compact_result(compacted["result"])
+        return compacted
+
+    def _compact_pi_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "status": result.get("status"),
+            "errorMessage": result.get("errorMessage"),
+            "forceStop": result.get("forceStop"),
+            "executedToolCalls": result.get("executedToolCalls"),
+            "droppedToolCalls": result.get("droppedToolCalls"),
+            "budgetExhausted": result.get("budgetExhausted"),
+            "stopReason": result.get("stopReason"),
+            "maxToolCalls": result.get("maxToolCalls"),
+            "maxModelCalls": result.get("maxModelCalls"),
+            "maxTotalTokens": result.get("maxTotalTokens"),
+            "modelCalls": result.get("modelCalls"),
+            "observedTotalTokens": result.get("observedTotalTokens"),
+            "maxContextMessages": result.get("maxContextMessages"),
+            "usage": result.get("usage", {}),
+            "context": result.get("context", {}),
+            "messages_count": len(result.get("messages", []) or []),
+            "events_tail": (result.get("events", []) or [])[-40:],
+        }
+
+    def _compact_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        compacted = dict(payload)
+        compacted["verifier_feedback"] = {
+            key: self._compact_text(value, 4000) if isinstance(value, str) else value
+            for key, value in (payload.get("verifier_feedback") or {}).items()
+        }
+        compacted["pi_result"] = self._compact_pi_result(payload.get("pi_result") or {})
+        compacted["tool_requests"] = [
+            self._compact_tool_request(request)
+            for request in payload.get("tool_requests", [])
+        ]
+        return compacted
+
+    def _load_trial_state(self, history: list[dict[str, Any]]) -> dict[str, Any]:
+        state = self._load_json(
+            self._trial_state_path(),
+            {
+                "phases": None,
+                "usage": {},
+                "tool_calls": None,
+                "elapsed_sec": None,
+            },
+        )
+        if state.get("phases") is not None:
+            return state
+
+        snapshot = summarize_trial_budget(history, self.trial_budget_limits)
+        elapsed_sec = sum(
+            float((item.get("metrics") or {}).get("elapsed_sec", 0))
+            for item in history
+        )
+        usage = {
+            key: sum(
+                int(((item.get("metrics") or {}).get("usage") or {}).get(key, 0) or 0)
+                for item in history
+            )
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+                "model_calls",
+            )
+        }
+        return {
+            "phases": snapshot.phases,
+            "usage": usage,
+            "tool_calls": snapshot.tool_calls,
+            "elapsed_sec": round(elapsed_sec, 3),
+        }
+
+    def _budget_from_state(self, state: dict[str, Any]) -> TrialBudgetSnapshot:
+        usage = state.get("usage") or {}
+        return TrialBudgetSnapshot(
+            limits=self.trial_budget_limits,
+            phases=int(state.get("phases", 0) or 0),
+            model_calls=int(usage.get("model_calls", 0) or 0),
+            tool_calls=int(state.get("tool_calls", 0) or 0),
+            total_tokens=int(usage.get("total_tokens", 0) or 0),
+        )
 
     def _read_tail(self, path: Path, max_chars: int = 5000) -> str | None:
         if not path.exists():
@@ -418,6 +529,7 @@ class PiRealLHTBAgent(BaseAgent):
                 "max_context_messages": self.max_context_messages,
                 "helper_timeout_sec": self.helper_timeout_sec,
                 "max_shell_timeout_sec": self.max_shell_timeout_sec,
+                "max_saved_history_records": self.max_saved_history_records,
                 "trial_budget_limits": self.trial_budget_limits.as_dict(),
             },
         )
@@ -544,10 +656,11 @@ class PiRealLHTBAgent(BaseAgent):
     ) -> None:
         history: list[dict[str, Any]] = self._load_json(self._history_path(), [])
         messages: list[dict[str, Any]] = self._load_json(self._messages_path(), [])
-        phase_index = len(history) + 1
+        trial_state = self._load_trial_state(history)
+        prior_budget = self._budget_from_state(trial_state)
+        phase_index = prior_budget.phases + 1
         verifier_feedback = self._verifier_feedback()
         started = time.monotonic()
-        prior_budget = summarize_trial_budget(history, self.trial_budget_limits)
 
         if prior_budget.stop_reason is not None:
             payload = {
@@ -582,7 +695,7 @@ class PiRealLHTBAgent(BaseAgent):
                 },
                 "tool_requests": [],
             }
-            context.metadata = payload
+            context.metadata = self._compact_payload(payload)
             return
 
         phase_limits = prior_budget.phase_limits(self.max_tool_calls_per_phase)
@@ -632,10 +745,9 @@ class PiRealLHTBAgent(BaseAgent):
             }
         elapsed_sec = round(time.monotonic() - started, 3)
         phase_usage = result.get("usage", {}).get("phase", {})
-        prior_metrics = [item.get("metrics", {}) for item in history]
+        prior_usage = trial_state.get("usage") or {}
         cumulative_usage = {
-            key: sum(int(item.get("usage", {}).get(key, 0)) for item in prior_metrics)
-            + int(phase_usage.get(key, 0))
+            key: int(prior_usage.get(key, 0) or 0) + int(phase_usage.get(key, 0) or 0)
             for key in (
                 "input_tokens",
                 "output_tokens",
@@ -646,11 +758,11 @@ class PiRealLHTBAgent(BaseAgent):
                 "model_calls",
             )
         }
-        cumulative_tool_calls = sum(int(item.get("tool_calls", 0)) for item in prior_metrics) + len(
+        cumulative_tool_calls = int(trial_state.get("tool_calls", 0) or 0) + len(
             result.get("tool_requests", [])
         )
         cumulative_elapsed_sec = round(
-            sum(float(item.get("elapsed_sec", 0)) for item in prior_metrics) + elapsed_sec,
+            float(trial_state.get("elapsed_sec", 0) or 0) + elapsed_sec,
             3,
         )
         metrics = {
@@ -661,18 +773,12 @@ class PiRealLHTBAgent(BaseAgent):
             "cumulative_tool_calls": cumulative_tool_calls,
             "cumulative_elapsed_sec": cumulative_elapsed_sec,
         }
-        budget_history = [
-            *history,
-            {
-                "metrics": {
-                    "usage": phase_usage,
-                    "tool_calls": len(result.get("tool_requests", [])),
-                }
-            },
-        ]
-        trial_budget = summarize_trial_budget(
-            budget_history,
-            self.trial_budget_limits,
+        trial_budget = TrialBudgetSnapshot(
+            limits=self.trial_budget_limits,
+            phases=phase_index,
+            model_calls=cumulative_usage["model_calls"],
+            tool_calls=cumulative_tool_calls,
+            total_tokens=cumulative_usage["total_tokens"],
         )
         stop_reason = (
             "harbor_timeout"
@@ -704,12 +810,27 @@ class PiRealLHTBAgent(BaseAgent):
             "pi_result": result,
             "tool_requests": result.get("tool_requests", []),
         }
-        history.append(payload)
-        self._save_json(self._history_path(), history)
+        compact_payload = self._compact_payload(payload)
+        history.append(compact_payload)
+        self._save_json(
+            self._history_path(),
+            history[-self.max_saved_history_records :],
+        )
         self._save_json(self._messages_path(), result.get("messages", []))
-        self._append_history_full(payload)
-        self._save_json(self.logs_dir / "trajectory.json", payload)
+        self._append_history_full(compact_payload)
+        self._save_json(self.logs_dir / "trajectory.json", compact_payload)
         self._save_json(self.logs_dir / "metrics.json", metrics)
+        self._save_json(
+            self._trial_state_path(),
+            {
+                "phases": trial_budget.phases,
+                "usage": cumulative_usage,
+                "tool_calls": cumulative_tool_calls,
+                "elapsed_sec": cumulative_elapsed_sec,
+                "stop_reason": stop_reason,
+                "stop_reasons": trial_budget.stop_reasons,
+            },
+        )
         cache_tokens = int(phase_usage.get("cache_read_tokens", 0) or 0) + int(
             phase_usage.get("cache_write_tokens", 0) or 0
         )
@@ -718,7 +839,7 @@ class PiRealLHTBAgent(BaseAgent):
         )
         context.n_cache_tokens = cache_tokens
         context.n_output_tokens = int(phase_usage.get("output_tokens", 0) or 0)
-        context.metadata = payload
+        context.metadata = compact_payload
         if cancelled_error is not None:
             raise cancelled_error
         if adapter_error is not None:

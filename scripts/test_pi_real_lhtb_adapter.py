@@ -52,6 +52,7 @@ async def test_cross_phase_budget(logs_dir: Path) -> dict[str, Any]:
         logs_dir=logs_dir,
         model_name="pi-real/test",
         max_tool_calls_per_phase=4,
+        max_saved_history_records=1,
         max_phases=2,
         max_model_calls=4,
         max_tool_calls=4,
@@ -96,6 +97,15 @@ async def test_cross_phase_budget(logs_dir: Path) -> dict[str, Any]:
     assert third.metadata is not None
     assert third.metadata["stop_requested"] is True
     assert len(agent.helper_calls) == 2
+
+    state = json.loads((logs_dir / "trial_state.json").read_text(encoding="utf-8"))
+    assert state["phases"] == 2
+    assert state["usage"]["model_calls"] == 4
+    assert state["tool_calls"] == 4
+    bounded_history = json.loads((logs_dir / "history.json").read_text(encoding="utf-8"))
+    assert len(bounded_history) == 1
+    assert bounded_history[0]["phase_index"] == 2
+    assert "messages" not in bounded_history[0]["pi_result"]
     return second.metadata["trial_budget"]
 
 
