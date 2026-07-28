@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-pi-real-five-task-protocol-v1
+job_name: hypha-exp-lhtb-pi-real-five-task-protocol-v2
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1

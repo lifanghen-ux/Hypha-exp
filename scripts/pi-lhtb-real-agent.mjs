@@ -5,6 +5,7 @@ import { Type } from "../benchmarks/pi-agent/packages/ai/dist/index.js";
 import { streamSimple } from "../benchmarks/pi-agent/packages/ai/dist/compat.js";
 import { Agent } from "../benchmarks/pi-agent/packages/agent/dist/index.js";
 import { loadDotEnv } from "./lhtb-llm-planner.mjs";
+import { createToolBudgetController } from "./pi-lhtb-tool-budget.mjs";
 
 loadDotEnv(new URL("..", import.meta.url).pathname);
 
@@ -293,9 +294,12 @@ try {
   rl.on("line", handleToolResultLine);
   const maxToolCalls = Number(input.max_tool_calls ?? 6);
   const maxContextMessages = Number(input.max_context_messages ?? process.env.LHTB_PI_MAX_CONTEXT_MESSAGES ?? 24);
-  let executedToolCalls = 0;
-  let forceStop = false;
   const events = [];
+  const toolBudget = createToolBudgetController({
+    maxToolCalls,
+    baseStreamFn: streamSimple,
+    allowedToolName: "shell",
+  });
   const initialMessages = selectContextMessages(
     Array.isArray(input.messages) ? input.messages : [],
     maxContextMessages,
@@ -321,29 +325,13 @@ try {
   ].join("\n");
 
   const agent = new Agent({
-    streamFn: streamSimple,
+    streamFn: toolBudget.streamFn,
     sessionId: input.run_id,
     toolExecution: "sequential",
     getApiKey: () => process.env.OPENAI_API_KEY || process.env.DEEPSEEK_API_KEY,
     transformContext: async (messages) => selectContextMessages(messages, maxContextMessages),
-    beforeToolCall: ({ toolCall }) => {
-      if (executedToolCalls >= maxToolCalls) {
-        forceStop = true;
-        return {
-          block: true,
-          reason: `Tool budget for this phase is exhausted (${maxToolCalls}). Stop this phase and wait for verifier feedback.`,
-        };
-      }
-      if (toolCall.name !== "shell") {
-        return { block: true, reason: `Only the shell tool is available, got ${toolCall.name}.` };
-      }
-      executedToolCalls += 1;
-      return undefined;
-    },
-    afterToolCall: ({ result }) => {
-      forceStop = executedToolCalls >= maxToolCalls;
-      return forceStop ? { ...result, terminate: true } : undefined;
-    },
+    beforeToolCall: toolBudget.beforeToolCall,
+    afterToolCall: toolBudget.afterToolCall,
     initialState: {
       systemPrompt,
       model: createModel(input),
@@ -361,6 +349,7 @@ try {
   const finalMessages = agent.state.messages;
   const selectedFinalContext = selectContextMessages(finalMessages, maxContextMessages);
   const finalUsage = summarizeUsage(finalMessages);
+  const budgetStats = toolBudget.stats();
 
   const resultPayload = {
     type: "done",
@@ -368,8 +357,10 @@ try {
     errorMessage: agent.state.errorMessage,
     messages: finalMessages,
     events,
-    forceStop,
-    executedToolCalls,
+    forceStop: budgetStats.forceStop,
+    executedToolCalls: budgetStats.executedToolCalls,
+    droppedToolCalls: budgetStats.droppedToolCalls,
+    budgetExhausted: budgetStats.budgetExhausted,
     maxToolCalls,
     maxContextMessages,
     usage: {

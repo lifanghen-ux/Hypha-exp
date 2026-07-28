@@ -32,6 +32,16 @@ def summarize_trial(trial_dir: Path) -> dict[str, Any]:
         for item in history
         for request in item.get("tool_requests", [])
     ]
+    dropped_tool_calls = sum(
+        int(item.get("pi_result", {}).get("droppedToolCalls", 0))
+        for item in history
+    )
+    budget_error_messages = sum(
+        json.dumps(item.get("pi_result", {}).get("messages", [])).count(
+            "Tool budget for this phase is exhausted"
+        )
+        for item in history
+    )
     orphan_calls = [
         call_id
         for item in history
@@ -61,6 +71,8 @@ def summarize_trial(trial_dir: Path) -> dict[str, Any]:
         "elapsed_sec": metrics.get("cumulative_elapsed_sec"),
         "usage": metrics.get("cumulative_usage", {}),
         "tool_calls": metrics.get("cumulative_tool_calls", len(tool_requests)),
+        "dropped_tool_calls": dropped_tool_calls,
+        "budget_error_messages": budget_error_messages,
         "max_tool_calls_in_phase": max(
             (len(item.get("tool_requests", [])) for item in history),
             default=0,

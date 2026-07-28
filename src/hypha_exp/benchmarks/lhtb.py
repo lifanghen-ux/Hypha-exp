@@ -346,7 +346,7 @@ class PiRealLHTBAgent(BaseAgent):
         return PiRealLHTBAgent.AGENT_NAME
 
     def version(self) -> str:
-        return "0.2.0"
+        return "0.3.0"
 
     def _history_path(self) -> Path:
         return self.logs_dir / "history.json"
