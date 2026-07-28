@@ -1,4 +1,4 @@
-job_name: hypha-exp-lhtb-pi-real-tool-loop-smoke-v3
+job_name: hypha-exp-lhtb-pi-real-five-task-protocol-v1
 jobs_dir: /root/projects/Hypha-exp/outputs/lhtb
 n_attempts: 1
 n_concurrent_trials: 1
@@ -12,9 +12,9 @@ environment:
 agents:
   - import_path: hypha_exp.benchmarks.lhtb:PiRealLHTBAgent
     model_name: pi-real/deepseek
-    override_timeout_sec: 180
+    override_timeout_sec: 1200
     kwargs:
-      max_tool_calls_per_phase: 3
+      max_tool_calls_per_phase: 4
       max_context_messages: 20
       helper_timeout_sec: 180
       max_shell_timeout_sec: 120
@@ -23,3 +23,7 @@ datasets:
   - path: ./benchmarks/LHTB/tasks
     task_names:
       - "2048"
+      - langchain-version-migration
+      - document-table-layout-reconstruction
+      - great-expectations-audit
+      - duckdb-optimizer-closure

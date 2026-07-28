@@ -46,13 +46,121 @@ function compactMessage(message) {
   };
 }
 
-function selectContextMessages(messages, maxMessages) {
-  if (!Array.isArray(messages) || messages.length <= maxMessages) {
-    return messages.map(compactMessage);
+function toolCallIds(message) {
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return [];
+  return message.content
+    .filter((block) => block?.type === "toolCall" && block.id)
+    .map((block) => String(block.id));
+}
+
+function toolResultId(message) {
+  return message?.role === "toolResult" && message.toolCallId
+    ? String(message.toolCallId)
+    : null;
+}
+
+function buildCompleteInteractionGroups(messages) {
+  const groups = [];
+  let droppedOrphanMessages = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role === "toolResult") {
+      droppedOrphanMessages += 1;
+      continue;
+    }
+
+    const callIds = toolCallIds(message);
+    if (callIds.length === 0) {
+      groups.push([message]);
+      continue;
+    }
+
+    const expected = new Set(callIds);
+    const group = [message];
+    let cursor = index + 1;
+    while (cursor < messages.length && messages[cursor]?.role === "toolResult") {
+      const resultId = toolResultId(messages[cursor]);
+      if (resultId && expected.has(resultId)) {
+        group.push(messages[cursor]);
+        expected.delete(resultId);
+      } else {
+        droppedOrphanMessages += 1;
+      }
+      cursor += 1;
+    }
+    index = cursor - 1;
+    if (expected.size === 0) {
+      groups.push(group);
+    } else {
+      droppedOrphanMessages += group.length;
+    }
   }
-  const first = messages[0]?.role === "user" ? [compactMessage(messages[0])] : [];
-  const recent = messages.slice(-maxMessages).map(compactMessage);
-  return [...first, ...recent];
+  return { groups, droppedOrphanMessages };
+}
+
+function selectContextMessages(messages, maxMessages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return [];
+  }
+  const limit = Math.max(1, Number(maxMessages) || 1);
+  const firstUser = messages[0]?.role === "user" ? messages[0] : null;
+  const remainingMessages = firstUser ? messages.slice(1) : messages;
+  const { groups } = buildCompleteInteractionGroups(remainingMessages);
+  const selected = [];
+  let available = limit - (firstUser ? 1 : 0);
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (group.length > available) continue;
+    selected.unshift(...group);
+    available -= group.length;
+    if (available === 0) break;
+  }
+  return [firstUser, ...selected].filter(Boolean).map(compactMessage);
+}
+
+function contextIntegrity(messages) {
+  const calls = new Set();
+  const results = new Set();
+  for (const message of messages) {
+    for (const id of toolCallIds(message)) calls.add(id);
+    const resultId = toolResultId(message);
+    if (resultId) results.add(resultId);
+  }
+  return {
+    toolCallCount: calls.size,
+    toolResultCount: results.size,
+    orphanToolCallIds: [...calls].filter((id) => !results.has(id)),
+    orphanToolResultIds: [...results].filter((id) => !calls.has(id)),
+  };
+}
+
+function summarizeUsage(messages) {
+  const summary = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+    total_tokens: 0,
+    model_calls: 0,
+  };
+  for (const message of messages) {
+    if (message?.role !== "assistant" || !message.usage) continue;
+    summary.input_tokens += Number(message.usage.input ?? 0);
+    summary.output_tokens += Number(message.usage.output ?? 0);
+    summary.cache_read_tokens += Number(message.usage.cacheRead ?? 0);
+    summary.cache_write_tokens += Number(message.usage.cacheWrite ?? 0);
+    summary.reasoning_tokens += Number(message.usage.reasoning ?? 0);
+    summary.total_tokens += Number(message.usage.totalTokens ?? 0);
+    summary.model_calls += 1;
+  }
+  return summary;
+}
+
+function subtractUsage(total, baseline) {
+  return Object.fromEntries(
+    Object.keys(total).map((key) => [key, Math.max(0, Number(total[key] ?? 0) - Number(baseline[key] ?? 0))]),
+  );
 }
 
 async function readInit() {
@@ -188,6 +296,11 @@ try {
   let executedToolCalls = 0;
   let forceStop = false;
   const events = [];
+  const initialMessages = selectContextMessages(
+    Array.isArray(input.messages) ? input.messages : [],
+    maxContextMessages,
+  );
+  const initialUsage = summarizeUsage(initialMessages);
 
   const systemPrompt = [
     "You are Pi running inside Long-Horizon Terminal-Bench.",
@@ -236,7 +349,7 @@ try {
       model: createModel(input),
       thinkingLevel: process.env.LHTB_REASONING_EFFORT === "off" ? "off" : "off",
       tools: [shellTool],
-      messages: selectContextMessages(Array.isArray(input.messages) ? input.messages : [], maxContextMessages),
+      messages: initialMessages,
     },
   });
 
@@ -245,17 +358,29 @@ try {
   });
 
   await agent.prompt(prompt);
+  const finalMessages = agent.state.messages;
+  const selectedFinalContext = selectContextMessages(finalMessages, maxContextMessages);
+  const finalUsage = summarizeUsage(finalMessages);
 
   const resultPayload = {
     type: "done",
     status: agent.state.errorMessage ? "error" : "completed",
     errorMessage: agent.state.errorMessage,
-    messages: agent.state.messages,
+    messages: finalMessages,
     events,
     forceStop,
     executedToolCalls,
     maxToolCalls,
     maxContextMessages,
+    usage: {
+      phase: subtractUsage(finalUsage, initialUsage),
+      all_messages: finalUsage,
+    },
+    context: {
+      stored_message_count: finalMessages.length,
+      selected_message_count: selectedFinalContext.length,
+      selected_integrity: contextIntegrity(selectedFinalContext),
+    },
   };
   const resultPath = input.result_path || `/tmp/pi-lhtb-result-${Date.now()}.json`;
   fs.writeFileSync(resultPath, JSON.stringify(resultPayload, null, 2));

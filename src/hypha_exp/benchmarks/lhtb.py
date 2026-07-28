@@ -324,6 +324,7 @@ class PiRealLHTBAgent(BaseAgent):
         max_tool_calls_per_phase: int = 6,
         max_context_messages: int = 24,
         helper_timeout_sec: int = 600,
+        max_shell_timeout_sec: int = 120,
         **kwargs: Any,
     ):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
@@ -334,6 +335,7 @@ class PiRealLHTBAgent(BaseAgent):
         self.max_tool_calls_per_phase = max_tool_calls_per_phase
         self.max_context_messages = max_context_messages
         self.helper_timeout_sec = helper_timeout_sec
+        self.max_shell_timeout_sec = max_shell_timeout_sec
 
     @staticmethod
     def _repo_root() -> Path:
@@ -344,7 +346,7 @@ class PiRealLHTBAgent(BaseAgent):
         return PiRealLHTBAgent.AGENT_NAME
 
     def version(self) -> str:
-        return "0.1.0"
+        return "0.2.0"
 
     def _history_path(self) -> Path:
         return self.logs_dir / "history.json"
@@ -399,6 +401,8 @@ class PiRealLHTBAgent(BaseAgent):
                 "node_path": self.node_path,
                 "max_tool_calls_per_phase": self.max_tool_calls_per_phase,
                 "max_context_messages": self.max_context_messages,
+                "helper_timeout_sec": self.helper_timeout_sec,
+                "max_shell_timeout_sec": self.max_shell_timeout_sec,
             },
         )
 
@@ -410,101 +414,108 @@ class PiRealLHTBAgent(BaseAgent):
         phase_index: int,
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
-        process = await asyncio.create_subprocess_exec(
-            self.node_path,
-            str(self.helper_path),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=50 * 1024 * 1024,
-        )
-        assert process.stdin is not None
-        assert process.stdout is not None
-
-        init_payload = {
-            "instruction": instruction,
-            "messages": messages,
-            "model_alias": self.model_name or self.name(),
-            "run_id": self.logs_dir.name,
-            "phase_index": phase_index,
-            "verifier_feedback": verifier_feedback,
-            "max_tool_calls": self.max_tool_calls_per_phase,
-            "max_context_messages": self.max_context_messages,
-            "result_path": str(self.logs_dir / "pi_helper_result.json"),
-        }
-        process.stdin.write((json.dumps(init_payload) + "\n").encode("utf-8"))
-        await process.stdin.drain()
-
+        process: asyncio.subprocess.Process | None = None
         tool_requests: list[dict[str, Any]] = []
-        started = asyncio.get_running_loop().time()
-        while True:
-            remaining = self.helper_timeout_sec - (asyncio.get_running_loop().time() - started)
-            if remaining <= 0:
-                process.kill()
-                raise TimeoutError(f"{self.name()} helper timed out after {self.helper_timeout_sec}s")
-            line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
-            if not line:
-                stderr = ""
-                if process.stderr is not None:
-                    stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
-                return_code = await process.wait()
-                raise RuntimeError(f"{self.name()} helper exited early ({return_code}): {stderr}")
-            decoded_line = line.decode("utf-8", errors="replace")
-            try:
-                event = json.loads(decoded_line)
-            except json.JSONDecodeError as error:
-                raise RuntimeError(f"{self.name()} emitted invalid protocol JSON: {decoded_line[:1000]}") from error
-            if event.get("type") == "tool_request":
-                args = event.get("args") or {}
-                command = str(args.get("command") or "")
-                timeout_sec = args.get("timeout_sec")
-                result = await environment.exec(
-                    command,
-                    timeout_sec=int(timeout_sec) if timeout_sec is not None else None,
-                )
-                response = {
-                    "type": "tool_result",
-                    "id": event["id"],
-                    "return_code": result.return_code,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "command": command,
-                }
-                tool_requests.append({**event, "result": response})
-                process.stdin.write((json.dumps(response) + "\n").encode("utf-8"))
-                await process.stdin.drain()
-            elif event.get("type") == "done":
-                if process.stdin is not None and not process.stdin.is_closing():
-                    process.stdin.close()
-                try:
-                    return_code = await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.node_path,
+                str(self.helper_path),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=50 * 1024 * 1024,
+            )
+            assert process.stdin is not None
+            assert process.stdout is not None
+
+            init_payload = {
+                "instruction": instruction,
+                "messages": messages,
+                "model_alias": self.model_name or self.name(),
+                "run_id": self.logs_dir.name,
+                "phase_index": phase_index,
+                "verifier_feedback": verifier_feedback,
+                "max_tool_calls": self.max_tool_calls_per_phase,
+                "max_context_messages": self.max_context_messages,
+                "result_path": str(self.logs_dir / "pi_helper_result.json"),
+            }
+            process.stdin.write((json.dumps(init_payload) + "\n").encode("utf-8"))
+            await process.stdin.drain()
+
+            started = asyncio.get_running_loop().time()
+            while True:
+                remaining = self.helper_timeout_sec - (asyncio.get_running_loop().time() - started)
+                if remaining <= 0:
+                    raise TimeoutError(f"{self.name()} helper timed out after {self.helper_timeout_sec}s")
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+                if not line:
+                    stderr = ""
+                    if process.stderr is not None:
+                        stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
                     return_code = await process.wait()
-                stderr = ""
-                if process.stderr is not None:
-                    stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
-                result_path = Path(event["result_path"])
+                    raise RuntimeError(f"{self.name()} helper exited early ({return_code}): {stderr}")
+                decoded_line = line.decode("utf-8", errors="replace")
                 try:
-                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                    event = json.loads(decoded_line)
                 except json.JSONDecodeError as error:
-                    raise RuntimeError(f"{self.name()} wrote invalid result JSON at {result_path}") from error
-                result["return_code"] = return_code
-                result["stderr"] = stderr
-                result["tool_requests"] = tool_requests
-                return result
-            elif event.get("type") == "error":
+                    raise RuntimeError(f"{self.name()} emitted invalid protocol JSON: {decoded_line[:1000]}") from error
+                if event.get("type") == "tool_request":
+                    args = event.get("args") or {}
+                    command = str(args.get("command") or "")
+                    requested_timeout = args.get("timeout_sec")
+                    try:
+                        requested_timeout_sec = int(requested_timeout) if requested_timeout is not None else None
+                    except (TypeError, ValueError):
+                        requested_timeout_sec = None
+                    effective_timeout_sec = min(
+                        max(1, requested_timeout_sec or self.max_shell_timeout_sec),
+                        self.max_shell_timeout_sec,
+                    )
+                    result = await environment.exec(command, timeout_sec=effective_timeout_sec)
+                    response = {
+                        "type": "tool_result",
+                        "id": event["id"],
+                        "return_code": result.return_code,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "command": command,
+                        "requested_timeout_sec": requested_timeout_sec,
+                        "effective_timeout_sec": effective_timeout_sec,
+                    }
+                    tool_requests.append({**event, "result": response})
+                    process.stdin.write((json.dumps(response) + "\n").encode("utf-8"))
+                    await process.stdin.drain()
+                elif event.get("type") == "done":
+                    return_code = await process.wait()
+                    stderr = ""
+                    if process.stderr is not None:
+                        stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
+                    result_path = Path(event["result_path"])
+                    try:
+                        result = json.loads(result_path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError as error:
+                        raise RuntimeError(f"{self.name()} wrote invalid result JSON at {result_path}") from error
+                    result["return_code"] = return_code
+                    result["stderr"] = stderr
+                    result["tool_requests"] = tool_requests
+                    return result
+                elif event.get("type") == "error":
+                    raise RuntimeError(f"{self.name()} helper error: {event.get('message')}")
+        finally:
+            if process is not None:
                 if process.stdin is not None and not process.stdin.is_closing():
                     process.stdin.close()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                stderr = ""
-                if process.stderr is not None:
-                    stderr = (await process.stderr.read()).decode("utf-8", errors="replace")
-                raise RuntimeError(f"{self.name()} helper error: {event.get('message')}\n{stderr}")
+                    try:
+                        await process.stdin.wait_closed()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
 
     async def run(
         self,
@@ -519,6 +530,7 @@ class PiRealLHTBAgent(BaseAgent):
         started = time.monotonic()
 
         adapter_error = None
+        cancelled_error: asyncio.CancelledError | None = None
         try:
             result = await self._run_pi_helper(
                 instruction=instruction,
@@ -527,6 +539,19 @@ class PiRealLHTBAgent(BaseAgent):
                 phase_index=phase_index,
                 environment=environment,
             )
+        except asyncio.CancelledError as error:
+            cancelled_error = error
+            adapter_error = {
+                "type": type(error).__name__,
+                "message": str(error) or "Agent run was cancelled",
+            }
+            result = {
+                "status": "adapter_cancelled",
+                "errorMessage": adapter_error["message"],
+                "messages": messages,
+                "tool_requests": [],
+                "usage": {"phase": {}, "all_messages": {}},
+            }
         except Exception as error:
             adapter_error = {
                 "type": type(error).__name__,
@@ -537,8 +562,39 @@ class PiRealLHTBAgent(BaseAgent):
                 "errorMessage": str(error),
                 "messages": messages,
                 "tool_requests": [],
+                "usage": {"phase": {}, "all_messages": {}},
             }
         elapsed_sec = round(time.monotonic() - started, 3)
+        phase_usage = result.get("usage", {}).get("phase", {})
+        prior_metrics = [item.get("metrics", {}) for item in history]
+        cumulative_usage = {
+            key: sum(int(item.get("usage", {}).get(key, 0)) for item in prior_metrics)
+            + int(phase_usage.get(key, 0))
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+                "model_calls",
+            )
+        }
+        cumulative_tool_calls = sum(int(item.get("tool_calls", 0)) for item in prior_metrics) + len(
+            result.get("tool_requests", [])
+        )
+        cumulative_elapsed_sec = round(
+            sum(float(item.get("elapsed_sec", 0)) for item in prior_metrics) + elapsed_sec,
+            3,
+        )
+        metrics = {
+            "usage": phase_usage,
+            "tool_calls": len(result.get("tool_requests", [])),
+            "elapsed_sec": elapsed_sec,
+            "cumulative_usage": cumulative_usage,
+            "cumulative_tool_calls": cumulative_tool_calls,
+            "cumulative_elapsed_sec": cumulative_elapsed_sec,
+        }
 
         payload = {
             "agent": self.name(),
@@ -548,6 +604,7 @@ class PiRealLHTBAgent(BaseAgent):
             "elapsed_sec": elapsed_sec,
             "verifier_feedback": verifier_feedback,
             "adapter_error": adapter_error,
+            "metrics": metrics,
             "pi_result": result,
             "tool_requests": result.get("tool_requests", []),
         }
@@ -556,6 +613,9 @@ class PiRealLHTBAgent(BaseAgent):
         self._save_json(self._messages_path(), result.get("messages", []))
         self._append_history_full(payload)
         self._save_json(self.logs_dir / "trajectory.json", payload)
+        self._save_json(self.logs_dir / "metrics.json", metrics)
         context.metadata = payload
+        if cancelled_error is not None:
+            raise cancelled_error
         if adapter_error is not None:
             raise RuntimeError(f"{self.name()} adapter error: {adapter_error['message']}")
