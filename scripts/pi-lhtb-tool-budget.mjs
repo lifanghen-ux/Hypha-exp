@@ -54,14 +54,33 @@ function truncateToolCalls(message, remaining) {
 
 export function createToolBudgetController({
   maxToolCalls,
+  maxModelCalls = null,
+  maxTotalTokens = null,
   baseStreamFn,
   allowedToolName,
 }) {
-  const limit = Math.max(1, Number(maxToolCalls) || 1);
+  const limit = Math.max(0, Number(maxToolCalls) || 0);
+  const modelLimit = maxModelCalls == null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(maxModelCalls) || 0);
+  const tokenLimit = maxTotalTokens == null
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(maxTotalTokens) || 0);
   const phaseEndingToolCallIds = new Set();
   let executedToolCalls = 0;
   let droppedToolCalls = 0;
+  let modelCalls = 0;
+  let totalTokens = 0;
   let forceStop = false;
+  let stopReason = null;
+
+  function markStop(reason, toolCallIds = []) {
+    forceStop = true;
+    stopReason ??= reason;
+    for (const id of toolCallIds) {
+      phaseEndingToolCallIds.add(id);
+    }
+  }
 
   function streamFn(model, context, options) {
     const target = createAssistantMessageEventStream();
@@ -69,19 +88,43 @@ export function createToolBudgetController({
 
     (async () => {
       try {
+        if (modelCalls >= modelLimit || totalTokens >= tokenLimit) {
+          markStop(
+            modelCalls >= modelLimit ? "max_model_calls" : "max_total_tokens",
+          );
+          const message = {
+            role: "assistant",
+            content: [],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: emptyUsage(),
+            stopReason: "stop",
+            timestamp: Date.now(),
+          };
+          target.push({ type: "done", reason: "stop", message });
+          return;
+        }
+
         const source = baseStreamFn(model, context, options);
         for await (const event of source) {
           if (event.type === "done") {
+            modelCalls += 1;
+            totalTokens += Number(event.message?.usage?.totalTokens ?? 0);
             const truncated = truncateToolCalls(event.message, remaining);
             droppedToolCalls += truncated.droppedToolCalls;
+            const modelBudgetReached = modelCalls >= modelLimit;
+            const tokenBudgetReached = totalTokens >= tokenLimit;
             if (
               truncated.acceptedToolCallIds.length > 0
               && truncated.acceptedToolCallIds.length === remaining
             ) {
-              forceStop = true;
-              for (const id of truncated.acceptedToolCallIds) {
-                phaseEndingToolCallIds.add(id);
-              }
+              markStop("max_tool_calls", truncated.acceptedToolCallIds);
+            }
+            if (modelBudgetReached) {
+              markStop("max_model_calls", truncated.acceptedToolCallIds);
+            } else if (tokenBudgetReached) {
+              markStop("max_total_tokens", truncated.acceptedToolCallIds);
             }
             target.push({ ...event, message: truncated.message });
           } else if (event.type === "error") {
@@ -130,8 +173,13 @@ export function createToolBudgetController({
       maxToolCalls: limit,
       executedToolCalls,
       droppedToolCalls,
+      maxModelCalls: Number.isFinite(modelLimit) ? modelLimit : null,
+      modelCalls,
+      maxTotalTokens: Number.isFinite(tokenLimit) ? tokenLimit : null,
+      totalTokens,
       forceStop,
       budgetExhausted: executedToolCalls >= limit,
+      stopReason,
     };
   }
 

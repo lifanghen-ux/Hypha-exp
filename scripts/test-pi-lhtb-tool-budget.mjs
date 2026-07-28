@@ -123,8 +123,13 @@ assert.deepEqual(firstPhase.stats, {
   maxToolCalls: 4,
   executedToolCalls: 4,
   droppedToolCalls: 2,
+  maxModelCalls: null,
+  modelCalls: 1,
+  maxTotalTokens: null,
+  totalTokens: 2,
   forceStop: true,
   budgetExhausted: true,
+  stopReason: "max_tool_calls",
 });
 assert.deepEqual(pairing(firstPhase.messages), { orphanCalls: [], orphanResults: [] });
 assert.equal(
@@ -139,9 +144,69 @@ assert.equal(secondPhase.stats.droppedToolCalls, 0);
 assert.equal(secondPhase.stats.forceStop, false);
 assert.deepEqual(pairing(secondPhase.messages), { orphanCalls: [], orphanResults: [] });
 
+const modelLimited = createToolBudgetController({
+  maxToolCalls: 4,
+  maxModelCalls: 1,
+  maxTotalTokens: 100,
+  baseStreamFn: fakeStreamSequence([1, 1]),
+  allowedToolName: "shell",
+});
+const modelLimitedAgent = new Agent({
+  streamFn: modelLimited.streamFn,
+  toolExecution: "sequential",
+  beforeToolCall: modelLimited.beforeToolCall,
+  afterToolCall: modelLimited.afterToolCall,
+  initialState: {
+    systemPrompt: "Protocol test.",
+    model,
+    thinkingLevel: "off",
+    tools: [shellTool],
+    messages: [],
+  },
+});
+await modelLimitedAgent.prompt("Run with a model-call limit.");
+assert.equal(modelLimited.stats().modelCalls, 1);
+assert.equal(modelLimited.stats().executedToolCalls, 1);
+assert.equal(modelLimited.stats().stopReason, "max_model_calls");
+assert.deepEqual(pairing(modelLimitedAgent.state.messages), {
+  orphanCalls: [],
+  orphanResults: [],
+});
+
+const tokenLimited = createToolBudgetController({
+  maxToolCalls: 4,
+  maxModelCalls: 4,
+  maxTotalTokens: 2,
+  baseStreamFn: fakeStreamSequence([1, 1]),
+  allowedToolName: "shell",
+});
+const tokenLimitedAgent = new Agent({
+  streamFn: tokenLimited.streamFn,
+  toolExecution: "sequential",
+  beforeToolCall: tokenLimited.beforeToolCall,
+  afterToolCall: tokenLimited.afterToolCall,
+  initialState: {
+    systemPrompt: "Protocol test.",
+    model,
+    thinkingLevel: "off",
+    tools: [shellTool],
+    messages: [],
+  },
+});
+await tokenLimitedAgent.prompt("Run with a token limit.");
+assert.equal(tokenLimited.stats().modelCalls, 1);
+assert.equal(tokenLimited.stats().totalTokens, 2);
+assert.equal(tokenLimited.stats().stopReason, "max_total_tokens");
+assert.deepEqual(pairing(tokenLimitedAgent.state.messages), {
+  orphanCalls: [],
+  orphanResults: [],
+});
+
 console.log(JSON.stringify({
   firstPhase: firstPhase.stats,
   secondPhase: secondPhase.stats,
+  modelLimited: modelLimited.stats(),
+  tokenLimited: tokenLimited.stats(),
   budgetErrorsInContext: false,
   orphanMessages: 0,
 }));

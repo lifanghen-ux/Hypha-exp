@@ -11,6 +11,11 @@ from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
+from hypha_exp.benchmarks.trial_budget import (
+    TrialBudgetLimits,
+    summarize_trial_budget,
+)
+
 
 class KernelPlanLHTBAgent(BaseAgent):
     """Shared Harbor adapter for kernel-planned LHTB actions."""
@@ -325,6 +330,10 @@ class PiRealLHTBAgent(BaseAgent):
         max_context_messages: int = 24,
         helper_timeout_sec: int = 600,
         max_shell_timeout_sec: int = 120,
+        max_phases: int | None = None,
+        max_model_calls: int | None = None,
+        max_tool_calls: int | None = None,
+        max_total_tokens: int | None = None,
         **kwargs: Any,
     ):
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
@@ -336,6 +345,12 @@ class PiRealLHTBAgent(BaseAgent):
         self.max_context_messages = max_context_messages
         self.helper_timeout_sec = helper_timeout_sec
         self.max_shell_timeout_sec = max_shell_timeout_sec
+        self.trial_budget_limits = TrialBudgetLimits(
+            max_phases=max_phases,
+            max_model_calls=max_model_calls,
+            max_tool_calls=max_tool_calls,
+            max_total_tokens=max_total_tokens,
+        )
 
     @staticmethod
     def _repo_root() -> Path:
@@ -346,7 +361,7 @@ class PiRealLHTBAgent(BaseAgent):
         return PiRealLHTBAgent.AGENT_NAME
 
     def version(self) -> str:
-        return "0.3.0"
+        return "0.4.0"
 
     def _history_path(self) -> Path:
         return self.logs_dir / "history.json"
@@ -403,6 +418,7 @@ class PiRealLHTBAgent(BaseAgent):
                 "max_context_messages": self.max_context_messages,
                 "helper_timeout_sec": self.helper_timeout_sec,
                 "max_shell_timeout_sec": self.max_shell_timeout_sec,
+                "trial_budget_limits": self.trial_budget_limits.as_dict(),
             },
         )
 
@@ -412,6 +428,7 @@ class PiRealLHTBAgent(BaseAgent):
         messages: list[dict[str, Any]],
         verifier_feedback: dict[str, Any],
         phase_index: int,
+        phase_limits: dict[str, int | None],
         environment: BaseEnvironment,
     ) -> dict[str, Any]:
         process: asyncio.subprocess.Process | None = None
@@ -435,7 +452,9 @@ class PiRealLHTBAgent(BaseAgent):
                 "run_id": self.logs_dir.name,
                 "phase_index": phase_index,
                 "verifier_feedback": verifier_feedback,
-                "max_tool_calls": self.max_tool_calls_per_phase,
+                "max_tool_calls": phase_limits["max_tool_calls"],
+                "max_model_calls": phase_limits["max_model_calls"],
+                "max_total_tokens": phase_limits["max_total_tokens"],
                 "max_context_messages": self.max_context_messages,
                 "result_path": str(self.logs_dir / "pi_helper_result.json"),
             }
@@ -528,26 +547,68 @@ class PiRealLHTBAgent(BaseAgent):
         phase_index = len(history) + 1
         verifier_feedback = self._verifier_feedback()
         started = time.monotonic()
+        prior_budget = summarize_trial_budget(history, self.trial_budget_limits)
+
+        if prior_budget.stop_reason is not None:
+            payload = {
+                "agent": self.name(),
+                "version": self.version(),
+                "model_name": self.model_name,
+                "phase_index": len(history),
+                "elapsed_sec": 0,
+                "verifier_feedback": verifier_feedback,
+                "adapter_error": None,
+                "stop_requested": True,
+                "stop_reason": prior_budget.stop_reason,
+                "stop_reasons": prior_budget.stop_reasons,
+                "termination": {
+                    "status": "budget_exhausted",
+                    "reason": prior_budget.stop_reason,
+                },
+                "trial_budget": prior_budget.as_dict(),
+                "metrics": {
+                    "usage": {},
+                    "tool_calls": 0,
+                    "elapsed_sec": 0,
+                    "cumulative_usage": {},
+                    "cumulative_tool_calls": prior_budget.tool_calls,
+                    "cumulative_elapsed_sec": 0,
+                },
+                "pi_result": {
+                    "status": "budget_exhausted",
+                    "messages": messages,
+                    "tool_requests": [],
+                    "usage": {"phase": {}, "all_messages": {}},
+                },
+                "tool_requests": [],
+            }
+            context.metadata = payload
+            return
+
+        phase_limits = prior_budget.phase_limits(self.max_tool_calls_per_phase)
 
         adapter_error = None
         cancelled_error: asyncio.CancelledError | None = None
+        termination = {"status": "completed", "reason": None}
         try:
             result = await self._run_pi_helper(
                 instruction=instruction,
                 messages=messages,
                 verifier_feedback=verifier_feedback,
                 phase_index=phase_index,
+                phase_limits=phase_limits,
                 environment=environment,
             )
         except asyncio.CancelledError as error:
             cancelled_error = error
-            adapter_error = {
-                "type": type(error).__name__,
+            termination = {
+                "status": "cancelled",
+                "reason": "harbor_timeout",
                 "message": str(error) or "Agent run was cancelled",
             }
             result = {
                 "status": "adapter_cancelled",
-                "errorMessage": adapter_error["message"],
+                "errorMessage": termination["message"],
                 "messages": messages,
                 "tool_requests": [],
                 "usage": {"phase": {}, "all_messages": {}},
@@ -563,6 +624,11 @@ class PiRealLHTBAgent(BaseAgent):
                 "messages": messages,
                 "tool_requests": [],
                 "usage": {"phase": {}, "all_messages": {}},
+            }
+            termination = {
+                "status": "error",
+                "reason": "adapter_error",
+                "message": str(error),
             }
         elapsed_sec = round(time.monotonic() - started, 3)
         phase_usage = result.get("usage", {}).get("phase", {})
@@ -595,6 +661,30 @@ class PiRealLHTBAgent(BaseAgent):
             "cumulative_tool_calls": cumulative_tool_calls,
             "cumulative_elapsed_sec": cumulative_elapsed_sec,
         }
+        budget_history = [
+            *history,
+            {
+                "metrics": {
+                    "usage": phase_usage,
+                    "tool_calls": len(result.get("tool_requests", [])),
+                }
+            },
+        ]
+        trial_budget = summarize_trial_budget(
+            budget_history,
+            self.trial_budget_limits,
+        )
+        stop_reason = (
+            "harbor_timeout"
+            if cancelled_error is not None
+            else trial_budget.stop_reason
+        )
+        stop_requested = trial_budget.stop_reason is not None
+        if stop_requested:
+            termination = {
+                "status": "budget_exhausted",
+                "reason": trial_budget.stop_reason,
+            }
 
         payload = {
             "agent": self.name(),
@@ -604,6 +694,12 @@ class PiRealLHTBAgent(BaseAgent):
             "elapsed_sec": elapsed_sec,
             "verifier_feedback": verifier_feedback,
             "adapter_error": adapter_error,
+            "stop_requested": stop_requested,
+            "stop_reason": stop_reason,
+            "stop_reasons": trial_budget.stop_reasons,
+            "termination": termination,
+            "trial_budget": trial_budget.as_dict(),
+            "phase_limits": phase_limits,
             "metrics": metrics,
             "pi_result": result,
             "tool_requests": result.get("tool_requests", []),
@@ -614,6 +710,14 @@ class PiRealLHTBAgent(BaseAgent):
         self._append_history_full(payload)
         self._save_json(self.logs_dir / "trajectory.json", payload)
         self._save_json(self.logs_dir / "metrics.json", metrics)
+        cache_tokens = int(phase_usage.get("cache_read_tokens", 0) or 0) + int(
+            phase_usage.get("cache_write_tokens", 0) or 0
+        )
+        context.n_input_tokens = (
+            int(phase_usage.get("input_tokens", 0) or 0) + cache_tokens
+        )
+        context.n_cache_tokens = cache_tokens
+        context.n_output_tokens = int(phase_usage.get("output_tokens", 0) or 0)
         context.metadata = payload
         if cancelled_error is not None:
             raise cancelled_error

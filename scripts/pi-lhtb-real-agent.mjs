@@ -293,10 +293,14 @@ try {
   const input = await readInit();
   rl.on("line", handleToolResultLine);
   const maxToolCalls = Number(input.max_tool_calls ?? 6);
+  const maxModelCalls = input.max_model_calls == null ? null : Number(input.max_model_calls);
+  const maxTotalTokens = input.max_total_tokens == null ? null : Number(input.max_total_tokens);
   const maxContextMessages = Number(input.max_context_messages ?? process.env.LHTB_PI_MAX_CONTEXT_MESSAGES ?? 24);
   const events = [];
   const toolBudget = createToolBudgetController({
     maxToolCalls,
+    maxModelCalls,
+    maxTotalTokens,
     baseStreamFn: streamSimple,
     allowedToolName: "shell",
   });
@@ -361,7 +365,12 @@ try {
     executedToolCalls: budgetStats.executedToolCalls,
     droppedToolCalls: budgetStats.droppedToolCalls,
     budgetExhausted: budgetStats.budgetExhausted,
+    stopReason: budgetStats.stopReason,
     maxToolCalls,
+    maxModelCalls,
+    maxTotalTokens,
+    modelCalls: budgetStats.modelCalls,
+    observedTotalTokens: budgetStats.totalTokens,
     maxContextMessages,
     usage: {
       phase: subtractUsage(finalUsage, initialUsage),
