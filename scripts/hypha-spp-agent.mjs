@@ -111,9 +111,6 @@ class OpenAICompatibleInference {
         const message = data.choices?.[0]?.message ?? {};
         const content =
           typeof message.content === "string" ? message.content.trim() : "";
-        if (!content) {
-          throw new Error("Model response did not contain message.content");
-        }
         const usage = tokenUsage(data.usage);
         const call = {
           requestId: data.id ?? null,
@@ -121,9 +118,17 @@ class OpenAICompatibleInference {
           finishReason: data.choices?.[0]?.finish_reason ?? null,
           elapsedMs: Date.now() - startedAt,
           attempt: attempt + 1,
+          status: content ? "completed" : "missing_content",
           usage,
         };
         this.calls.push(call);
+        if (!content) {
+          const error = new Error(
+            `Model response did not contain message.content (finish_reason=${call.finishReason ?? "unknown"})`,
+          );
+          error.retryable = true;
+          throw error;
+        }
         return {
           id: data.id ?? `${request.runId}:${request.stepId}:inference`,
           output: { action: "finish", output: content },
