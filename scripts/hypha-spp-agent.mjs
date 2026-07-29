@@ -77,9 +77,9 @@ class OpenAICompatibleInference {
       temperature: this.config.temperature,
       max_tokens: this.config.maxTokens,
     };
-    const startedAt = Date.now();
     let lastError;
     for (let attempt = 0; attempt <= this.config.retries; attempt += 1) {
+      const attemptStartedAt = Date.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
       try {
@@ -116,7 +116,7 @@ class OpenAICompatibleInference {
           requestId: data.id ?? null,
           model: data.model ?? this.config.model,
           finishReason: data.choices?.[0]?.finish_reason ?? null,
-          elapsedMs: Date.now() - startedAt,
+          elapsedMs: Date.now() - attemptStartedAt,
           attempt: attempt + 1,
           status: content ? "completed" : "missing_content",
           usage,

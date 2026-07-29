@@ -167,12 +167,11 @@ def _run_item(
             raise RuntimeError(
                 f"Hypha SPP run did not complete: {result.get('status')}: {detail}"
             )
-        finish_reasons = {
-            str(entry.get("finishReason"))
-            for entry in result.get("calls", [])
-            if entry.get("finishReason") is not None
-        }
-        if "length" in finish_reasons:
+        model_attempts = result.get("calls", [])
+        final_finish_reason = (
+            model_attempts[-1].get("finishReason") if model_attempts else None
+        )
+        if final_finish_reason == "length":
             raise RuntimeError(
                 f"Hypha model output was truncated at {args.max_tokens} tokens"
             )
