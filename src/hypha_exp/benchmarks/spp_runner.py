@@ -145,23 +145,52 @@ def _run_item(
     parsed: str | list[str] | None = None
     status = "ok"
     error: str | None = None
+    warnings: list[dict[str, Any]] = []
+
+    def _tail(value: str | bytes | None, limit: int = 3000) -> str | None:
+        if value is None:
+            return None
+        text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+        return text[-limit:]
 
     def call(task: str, role: str) -> dict[str, Any]:
-        result = run_hypha_agent(
-            task,
-            args.model,
-            args.workspace,
-            helper_path=args.helper,
-            node_path=args.node,
-            timeout_sec=args.timeout,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            retries=args.retries,
-            run_id=f"{run_id}:{index}:{role}",
-            session_id=f"{run_id}:{index}:{role}",
-        )
+        call_record: dict[str, Any] = {"role": role, "task": task}
+        raw["calls"].append(call_record)
+        try:
+            result = run_hypha_agent(
+                task,
+                args.model,
+                args.workspace,
+                helper_path=args.helper,
+                node_path=args.node,
+                timeout_sec=args.timeout,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                retries=args.retries,
+                run_id=f"{run_id}:{index}:{role}",
+                session_id=f"{run_id}:{index}:{role}",
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_result = {
+                "status": "subprocess_timeout",
+                "errorType": "subprocess_timeout",
+                "error": f"Hypha SPP helper subprocess exceeded {args.timeout} seconds",
+                "timeoutSec": args.timeout,
+                "stdoutTail": _tail(exc.output),
+                "stderrTail": _tail(exc.stderr),
+            }
+            call_record["result"] = timeout_result
+            raise RuntimeError(timeout_result["error"]) from exc
+        except RuntimeError as exc:
+            call_record["result"] = {
+                "status": "helper_error",
+                "errorType": "helper_error",
+                "error": str(exc),
+            }
+            raise
+
         calls.append(result)
-        raw["calls"].append({"role": role, "task": task, "result": result})
+        call_record["result"] = result
         if result.get("status") != "completed":
             detail = result.get("error") or "no error detail"
             raise RuntimeError(
@@ -172,9 +201,24 @@ def _run_item(
             model_attempts[-1].get("finishReason") if model_attempts else None
         )
         if final_finish_reason == "length":
-            raise RuntimeError(
-                f"Hypha model output was truncated at {args.max_tokens} tokens"
-            )
+            output = str(result.get("output") or "")
+            if not output:
+                raise RuntimeError(
+                    "Hypha model hit the max token limit without returning message.content "
+                    f"(max_tokens={args.max_tokens})"
+                )
+            warning = {
+                "type": "length_truncated_with_content",
+                "role": role,
+                "maxTokens": args.max_tokens,
+                "message": (
+                    "Model finish_reason=length but returned content; scoring the "
+                    "available truncated content instead of converting to agent_error."
+                ),
+            }
+            warnings.append(warning)
+            result.setdefault("warnings", []).append(warning)
+            raw.setdefault("warnings", []).append(warning)
         return result
 
     try:
@@ -229,6 +273,7 @@ def _run_item(
         "rawArtifact": raw_ref,
         "modelUsage": _sum_usage(calls),
         "wallTimeSec": round(time.monotonic() - started, 3),
+        **({"warnings": warnings} if warnings else {}),
         **({"error": error} if error else {}),
     }
 
@@ -253,6 +298,15 @@ def _summary(
         "statusCounts": {
             status: sum(item["status"] == status for item in items)
             for status in ("ok", "parse_error", "agent_error")
+        },
+        "warningCounts": {
+            "length_truncated_with_content": sum(
+                any(
+                    warning.get("type") == "length_truncated_with_content"
+                    for warning in item.get("warnings", [])
+                )
+                for item in items
+            )
         },
         "official": {
             "earned": earned,
